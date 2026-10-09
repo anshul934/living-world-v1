@@ -1,28 +1,34 @@
 import * as THREE from "three"
 
 export class VisitorInput {
-  constructor(camera) {
+  constructor(camera, domElement) {
     this.camera = camera
+    this.domElement = domElement
 
-    // Mouse position in normalized device coordinates
+    // Mouse position in normalized device coordinates.
+    // Range:
+    // x = -1 to +1
+    // y = -1 to +1
     this.mouse = new THREE.Vector2()
 
-    // Visitor position in world coordinates
+    // Current visitor position in world space.
     this.position = new THREE.Vector3()
 
-    // Previous visitor position
+    // Previous visitor position.
     this.lastPosition = new THREE.Vector3()
 
-    // Visitor movement information
+    // Movement information.
     this.speed = 0
     this.isMoving = false
+
+    // Prevent the system from treating the visitor
+    // as being at (0, 0, 0) before the mouse is used.
     this.hasInput = false
 
-    // Raycaster converts mouse screen coordinates
-    // into a point in the 3D world
+    // Three.js raycaster.
     this.raycaster = new THREE.Raycaster()
 
-    // The forest ground is at Y = 0
+    // Horizontal ground plane at world Y = 0.
     this.groundPlane = new THREE.Plane(
       new THREE.Vector3(0, 1, 0),
       0
@@ -37,17 +43,36 @@ export class VisitorInput {
   }
 
   updateMousePosition(event) {
-    // Convert mouse position to
-    // normalized device coordinates.
-    //
-    // X: -1 = left, +1 = right
-    // Y: +1 = top, -1 = bottom
+    // Get the actual position and size of the
+    // Three.js rendering canvas on the screen.
+    const rect =
+      this.domElement.getBoundingClientRect()
 
+    // Convert browser screen coordinates
+    // into coordinates relative to the canvas.
+    const mouseX =
+      event.clientX - rect.left
+
+    const mouseY =
+      event.clientY - rect.top
+
+    // Convert canvas coordinates into
+    // Normalized Device Coordinates.
+    //
+    // x:
+    // left  = -1
+    // center = 0
+    // right = +1
+    //
+    // y:
+    // top    = +1
+    // center = 0
+    // bottom = -1
     this.mouse.x =
-      (event.clientX / window.innerWidth) * 2 - 1
+      (mouseX / rect.width) * 2 - 1
 
     this.mouse.y =
-      -(event.clientY / window.innerHeight) * 2 + 1
+      -(mouseY / rect.height) * 2 + 1
 
     // Create a ray from the camera
     // through the mouse position.
@@ -56,22 +81,28 @@ export class VisitorInput {
       this.camera
     )
 
-    // Find where that ray intersects
-    // the forest ground.
+    // Temporary vector used to store
+    // the world-space intersection point.
     const intersectionPoint =
       new THREE.Vector3()
 
+    // Find where the mouse ray intersects
+    // the horizontal forest ground.
     const hit =
       this.raycaster.ray.intersectPlane(
         this.groundPlane,
         intersectionPoint
       )
 
-    // If the ray successfully hit the ground,
-    // update the visitor position.
+    // Only update the visitor if the ray
+    // successfully hit the ground plane.
     if (hit) {
-      this.lastPosition.copy(this.position)
+      // Store previous position.
+      this.lastPosition.copy(
+        this.position
+      )
 
+      // Store new world position.
       this.position.copy(
         intersectionPoint
       )
@@ -82,9 +113,12 @@ export class VisitorInput {
           this.lastPosition
         )
 
+      // Small threshold prevents tiny mouse
+      // movements from being treated as movement.
       this.isMoving =
         this.speed > 0.001
 
+      // We now have valid visitor input.
       this.hasInput = true
     }
   }

@@ -3,6 +3,7 @@ import './style.css'
 import { Butterfly } from './creatures/Butterfly.js'
 import { VisitorInput } from './interaction/VisitorInput.js'
 import { InteractionEngine} from './interaction/InteractionEngine.js'
+import { BehaviorEngine } from './ai/BehaviorEngine.js'
 
 // --------------------
 // 1. Create the scene
@@ -218,9 +219,9 @@ function createGrassPatch(x, z) {
 
 createTree(-4, -3)
 createTree(4, -2)
-createTree(-5, 3)
-createTree(5, 4)
-createTree(1, -5)
+//createTree(-5, 3)
+//createTree(5, 4)
+//createTree(1, -5)
 
 createTree(-7, -6)
 createTree(-3, -7)
@@ -233,9 +234,9 @@ createTree(8, -1)
 createTree(-7, 2)
 createTree(7, 2)
 
-createTree(-6, 6)
-createTree(-2, 5)
-createTree(3, 5)
+//createTree(-6, 6)
+//createTree(-2, 5)
+//createTree(3, 5)
 createTree(7, 6)
 
 createTree(-9, 5)
@@ -263,23 +264,108 @@ createGrassPatch(8, -5)
 createGrassPatch(-1, -6)
 createGrassPatch(4, -7)
 
+
+// --------------------
+//  Create target flowers
+// --------------------
+function createFlower(scene, x, z, petalColor) {
+  const flower = new THREE.Group()
+
+  // Stem
+  const stem = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.035, 0.05, 0.7, 6),
+    new THREE.MeshStandardMaterial({ color: 0x397a38 })
+  )
+  stem.position.y = 0.35
+  flower.add(stem)
+
+  // Centre
+  const centre = new THREE.Mesh(
+    new THREE.SphereGeometry(0.11, 10, 10),
+    new THREE.MeshStandardMaterial({ color: 0xffd54f })
+  )
+  centre.position.y = 0.75
+  flower.add(centre)
+
+  // Petals
+  const petalMaterial = new THREE.MeshStandardMaterial({
+    color: petalColor,
+    side: THREE.DoubleSide
+  })
+
+  for (let i = 0; i < 6; i++) {
+    const angle = (i / 6) * Math.PI * 2
+
+    const petal = new THREE.Mesh(
+      new THREE.SphereGeometry(0.12, 8, 8),
+      petalMaterial
+    )
+
+    petal.position.set(
+      Math.cos(angle) * 0.17,
+      0.75,
+      Math.sin(angle) * 0.17
+    )
+
+    petal.scale.set(1, 0.65, 1)
+    flower.add(petal)
+  }
+
+  flower.position.set(x, 0, z)
+  scene.add(flower)
+
+  // Keep the target at the flower's world position.
+  // The butterfly will hover at y = 2 above this point.
+  return new THREE.Vector3(x, 2, z)
+}
+
+const flowerTargets = [
+  createFlower(scene, -6, -5, 0xff77aa),
+  createFlower(scene, -3,  4, 0xffffff),
+  createFlower(scene,  0, -6, 0xffbb55),
+  createFlower(scene,  4, -4, 0xcc99ff),
+  createFlower(scene,  6,  1, 0xff7799),
+  createFlower(scene, -6,  2, 0xffff99),
+  createFlower(scene,  2,  6, 0xff99cc),
+  createFlower(scene,  6,  6, 0xffffff)
+]
+
+
 const butterfly = new Butterfly(scene)
-const visitor = new VisitorInput(camera)
+const visitor = new VisitorInput(camera, renderer.domElement)
 const interactionEngine = new InteractionEngine()
+const behaviorEngine = new BehaviorEngine()
+behaviorEngine.setFlowerTargets(flowerTargets)
 
 // --------------------
 // 8. Animation loop
 // --------------------
+
+
+const timer = new THREE.Timer()
+timer.connect(document)
+
 function animate() {
   requestAnimationFrame(animate)
 
+  // IMPORTANT: update the timer before reading delta time.
+  timer.update()
 
-  const interaction = 
-    interactionEngine.getButterflyInteraction(
-      visitor,
-      butterfly.position
-    )
-  butterfly.update(interaction)
+  // Time elapsed since the previous animation frame, in seconds.
+  const deltaSeconds = Math.min(timer.getDelta(), 0.05)
+
+  const interaction = interactionEngine.getButterflyInteraction(
+    visitor,
+    butterfly.position
+  )
+
+  const behavior = behaviorEngine.update(
+    butterfly.position,
+    interaction,
+    deltaSeconds
+  )
+
+  butterfly.update(behavior, deltaSeconds)
 
   renderer.render(scene, camera)
 }
