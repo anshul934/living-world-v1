@@ -432,7 +432,7 @@ Mouse-to-world conversion is now based on the actual rendering canvas rather tha
 
 ---
 
-# 2026-10-08 — Day 3: Documentation System
+# 2026-10-08 : Documentation System
 
 ## Added
 
@@ -539,3 +539,13 @@ Next:
 
 ---
 
+## 2026-10-14 — Creature Behavior Validation Baseline
+
+- Validated the six existing creature behavior tests successfully.
+- Confirmed birds can investigate a motionless visitor after a waiting period.
+- Confirmed tree-click interactions trigger bird relocation.
+- Confirmed butterfly threat orientation and safer-direction escape behavior.
+- Confirmed the tested behaviors produce the expected results.
+- Established this version as the behavior regression baseline.
+
+**Next:** Add diagnostics and formalize the threat-provider contract before implementing predictive threat estimation.

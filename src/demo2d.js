@@ -25,8 +25,10 @@ const TOUCH_DISTANCE = 31
 const SAFE_DISTANCE = 210
 const VISITOR_DISTURBANCE_DISTANCE = 120
 const HAVEN_STILLNESS_MS = 3500
+const CURIOSITY_STILLNESS_MS = 2500
 const GENTLE_APPROACH_SPEED = 185
 const RAPID_APPROACH_SPEED = 310
+const THREAT_RADIUS = 260
 
 let viewScale = 1
 let offsetX = 0
@@ -40,6 +42,41 @@ const previousVisitorDistances = new Map()
 let hoveredTreeIndex = -1
 let forestDisturbance = 0
 let lastDisturbanceTime = 0
+let birdCuriosityId = null
+let nextBirdCuriosityAt = 0
+
+// Threat intensity is normalized to [0, 1]; vectors point away from the nearest active visitor.
+export const ThreatProvider = {
+  getThreatAt(x, y, ignoreCalmVisitors = false) {
+    let threat = 0
+    for (const item of visitors) {
+      if (!item.active ||
+          (ignoreCalmVisitors && calmOptionsFor(item, performance.now()))) continue
+      const intensity = clamp(
+        1 - distance(x, y, item.x, item.y) / THREAT_RADIUS,
+        0,
+        1
+      )
+      threat = Math.max(threat, intensity)
+    }
+    return threat
+  },
+  getThreatVectorAt(x, y, ignoreCalmVisitors = false) {
+    const source = closestVisitor(
+      x,
+      y,
+      ignoreCalmVisitors
+        ? visitors.filter((item) => !calmOptionsFor(item, performance.now()))
+        : visitors
+    )
+    if (!source) return { x: 0, y: 0 }
+    const dx = x - source.x
+    const dy = y - source.y
+    const length = Math.hypot(dx, dy)
+    if (length === 0) return { x: 0, y: 0 }
+    return { x: dx / length, y: dy / length }
+  }
+}
 
 const butterfly = {
   x: 490, y: 325,
@@ -61,6 +98,13 @@ const butterfly = {
   escapeY: 260,
   lastState: "REST",
   flutterPhase: 0,
+  bodyAngle: 0,
+  orientationTargetAngle: 0,
+  orientationStartAngle: 0,
+  orientationElapsed: 0,
+  orientationActive: false,
+  isOrienting: false,
+  headingResponse: 11,
   landing: 0,
   color: "#e7a9d0"
 }
@@ -99,13 +143,12 @@ const trees = [
   { x: 840, y: 285, r: 60, shade: 0, sway: 5.8, rustle: 0 }
 ]
 const birds = [
-  { id: 1, treeIndex: 2, revealed: false, flight: null, curiousVisitorId: null, havenVisitorId: null, nextVisitorSwitchAt: 0, orbitAngle: 0, phase: 0.3, nextMoveAt: performance.now() + 14000 },
-  { id: 2, treeIndex: 4, revealed: false, flight: null, curiousVisitorId: null, havenVisitorId: null, nextVisitorSwitchAt: 0, orbitAngle: 2.1, phase: 2.1, nextMoveAt: performance.now() + 23000 },
-  { id: 3, treeIndex: 0, revealed: false, flight: null, curiousVisitorId: null, havenVisitorId: null, nextVisitorSwitchAt: 0, orbitAngle: 1.2, phase: 1.2, nextMoveAt: performance.now() + 17000 },
-  { id: 4, treeIndex: 1, revealed: false, flight: null, curiousVisitorId: null, havenVisitorId: null, nextVisitorSwitchAt: 0, orbitAngle: 3.7, phase: 3.7, nextMoveAt: performance.now() + 19000 },
-  { id: 5, treeIndex: 3, revealed: false, flight: null, curiousVisitorId: null, havenVisitorId: null, nextVisitorSwitchAt: 0, orbitAngle: 5.1, phase: 5.1, nextMoveAt: performance.now() + 26000 }
+  { id: 1, treeIndex: 2, revealed: false, flight: null, readiness: false, headingAngle: 0, curiousVisitorId: null, havenVisitorId: null, nextVisitorSwitchAt: 0, orbitAngle: 0, phase: 0.3 },
+  { id: 2, treeIndex: 4, revealed: false, flight: null, readiness: false, headingAngle: 0, curiousVisitorId: null, havenVisitorId: null, nextVisitorSwitchAt: 0, orbitAngle: 2.1, phase: 2.1 },
+  { id: 3, treeIndex: 0, revealed: false, flight: null, readiness: false, headingAngle: 0, curiousVisitorId: null, havenVisitorId: null, nextVisitorSwitchAt: 0, orbitAngle: 1.2, phase: 1.2 },
+  { id: 4, treeIndex: 1, revealed: false, flight: null, readiness: false, headingAngle: 0, curiousVisitorId: null, havenVisitorId: null, nextVisitorSwitchAt: 0, orbitAngle: 3.7, phase: 3.7 },
+  { id: 5, treeIndex: 3, revealed: false, flight: null, readiness: false, headingAngle: 0, curiousVisitorId: null, havenVisitorId: null, nextVisitorSwitchAt: 0, orbitAngle: 5.1, phase: 5.1 }
 ]
-let birdExplorationGroup = new Set()
 const motes = Array.from({ length: 36 }, (_, i) => ({
   x: (i * 197.3 + 53) % WORLD_W,
   y: (i * 91.7 + 21) % WORLD_H,
@@ -190,7 +233,7 @@ function visitorById(id) {
 function calmOptionsFor(item, now) {
   return item.active &&
     item.lastMovedAt > 0 &&
-    now - item.lastMovedAt > 2500
+    now - item.lastMovedAt > CURIOSITY_STILLNESS_MS
 }
 function calmVisitors(now) {
   return visitors.filter((item) =>
@@ -354,18 +397,65 @@ function closestVisitor(x, y, candidates = visitors) {
   return closest
 }
 function chooseEscapeTarget(creature) {
-  const threat = closestVisitor(creature.x, creature.y)
-  const source = threat ?? visitor
-  let dx = creature.x - source.x
-  let dy = creature.y - source.y
-  const length = Math.hypot(dx, dy) || 1
-  dx /= length; dy /= length
-  const jitter = (Math.random() - .5) * .55
-  const cos = Math.cos(jitter), sin = Math.sin(jitter)
-  const rx = dx * cos - dy * sin
-  const ry = dx * sin + dy * cos
-  creature.escapeX = clamp(creature.x + rx * 155, 38, WORLD_W - 38)
-  creature.escapeY = clamp(creature.y + ry * 135, 65, WORLD_H - 70)
+  const threatVector = ThreatProvider.getThreatVectorAt(creature.x, creature.y, true)
+  const currentThreat = ThreatProvider.getThreatAt(creature.x, creature.y, true)
+  let safestDirection = { x: threatVector.x, y: threatVector.y }
+  let lowestThreat = Infinity
+  let bestAlignment = -Infinity
+
+  for (let i = 0; i < 8; i++) {
+    const angle = i * Math.PI / 4
+    const direction = { x: Math.cos(angle), y: Math.sin(angle) }
+    const sampleX = clamp(creature.x + direction.x * 60, 0, WORLD_W)
+    const sampleY = clamp(creature.y + direction.y * 60, 0, WORLD_H)
+    const sampleThreat = ThreatProvider.getThreatAt(sampleX, sampleY, true)
+    const alignment = direction.x * threatVector.x + direction.y * threatVector.y
+    if (sampleThreat < lowestThreat - .0001 ||
+        (Math.abs(sampleThreat - lowestThreat) <= .0001 && alignment > bestAlignment)) {
+      safestDirection = direction
+      lowestThreat = sampleThreat
+      bestAlignment = alignment
+    }
+  }
+
+  if (!Number.isFinite(lowestThreat) || currentThreat === 0) return
+  creature.escapeX = clamp(creature.x + safestDirection.x * 155, 38, WORLD_W - 38)
+  creature.escapeY = clamp(creature.y + safestDirection.y * 155, 65, WORLD_H - 70)
+}
+function updateButterflyOrientation(creature, threatLevel, threatVector, dt) {
+  if (threatLevel >= .3 || threatLevel < .1) {
+    creature.orientationActive = false
+    creature.isOrienting = false
+    return
+  }
+
+  if (Math.hypot(threatVector.x, threatVector.y) > 0) {
+    const targetAngle = Math.atan2(threatVector.y, threatVector.x) + Math.PI / 2
+    const targetDifference = Math.atan2(
+      Math.sin(targetAngle - creature.orientationTargetAngle),
+      Math.cos(targetAngle - creature.orientationTargetAngle)
+    )
+    if (!creature.orientationActive || Math.abs(targetDifference) > .45) {
+      creature.orientationStartAngle = creature.bodyAngle
+      creature.orientationTargetAngle = targetAngle
+      creature.orientationElapsed = 0
+      creature.isOrienting = true
+    }
+    creature.orientationActive = true
+  } else {
+    creature.orientationActive = false
+  }
+
+  if (!creature.isOrienting) return
+  creature.orientationElapsed += dt
+  const progress = clamp(creature.orientationElapsed / .18, 0, 1)
+  const angleDifference = Math.atan2(
+    Math.sin(creature.orientationTargetAngle - creature.orientationStartAngle),
+    Math.cos(creature.orientationTargetAngle - creature.orientationStartAngle)
+  )
+  const easedProgress = progress * progress * (3 - 2 * progress)
+  creature.bodyAngle = creature.orientationStartAngle + angleDifference * easedProgress
+  if (progress === 1) creature.isOrienting = false
 }
 function startCuriosity(creature, target = visitorById(creature.curiosityVisitorId)) {
   if (!target) return
@@ -433,6 +523,8 @@ function updateEnergy(creature, dt) {
 function updateButterflyHaven(creature, target, dt, index) {
   if (creature.state !== "HAVEN") changeState(creature, "HAVEN")
   creature.havenVisitorId = target.id
+  creature.orientationActive = false
+  creature.isOrienting = false
 
   const angle = index * Math.PI - Math.PI / 2
   const targetX = target.x + Math.cos(angle) * 21
@@ -448,11 +540,19 @@ function updateButterflyHaven(creature, target, dt, index) {
   creature.vy += (desiredVY - creature.vy) * blend
   creature.x = clamp(creature.x + creature.vx * dt, 26, WORLD_W - 26)
   creature.y = clamp(creature.y + creature.vy * dt, 55, WORLD_H - 55)
+  updateButterflyHeading(creature, dt)
   creature.fear = Math.max(0, creature.fear - .2 * dt)
   creature.energy = clamp(creature.energy + .025 * dt, MIN_ENERGY, 1)
   creature.flutterPhase += dt * 7
 }
 function updateButterfly(creature, dt, now) {
+  const threatLevel = ThreatProvider.getThreatAt(creature.x, creature.y, true)
+  const threatVector = ThreatProvider.getThreatVectorAt(creature.x, creature.y, true)
+  if (threatLevel >= .3) {
+    creature.havenVisitorId = null
+    changeState(creature, "FLEE")
+  }
+
   const butterflyHavens = visitors.filter((item) =>
     item.active && item.havenType === "butterfly"
   )
@@ -460,7 +560,8 @@ function updateButterfly(creature, dt, now) {
   const havenTarget = currentHaven?.havenType === "butterfly"
     ? currentHaven
     : chooseVisitor(butterflyHavens, creature.havenVisitorId)
-  if (havenTarget) {
+  if (havenTarget && threatLevel < .3) {
+    creature.curiosityVisitorId = null
     updateButterflyHaven(creature, havenTarget, dt, butterflies.indexOf(creature))
     return
   }
@@ -469,8 +570,10 @@ function updateButterfly(creature, dt, now) {
     if (creature.state === "HAVEN") changeState(creature, "RETURN")
   }
 
+  updateButterflyOrientation(creature, threatLevel, threatVector, dt)
+
   const closest = closestVisitor(creature.x, creature.y)
-  const threat = closestVisitor(
+  const threatVisitor = closestVisitor(
     creature.x,
     creature.y,
     visitors.filter((item) => {
@@ -482,7 +585,7 @@ function updateButterfly(creature, dt, now) {
             (d < CLOSE_DISTANCE && !visitorIsCalm)))
     })
   )
-  const nearest = threat ?? closest
+  const nearest = threatVisitor ?? closest
   const d = nearest ? distance(nearest.x, nearest.y, creature.x, creature.y) : Infinity
   const approach = nearest?.approachSpeed ?? 0
   const calmOptions = calmVisitors(now)
@@ -499,16 +602,22 @@ function updateButterfly(creature, dt, now) {
     if (creature.state === "CURIOUS") startCuriosity(creature, curiosityTarget)
   }
   const isCalm = Boolean(curiosityTarget && calmOptions.some((item) => item.id === curiosityTarget.id))
+  const curiosityTargetIsDisturbed = Boolean(
+    curiosityTarget && visitorIsDisturbed(curiosityTarget, now)
+  )
   const nearestIsCalm = nearest ? calmOptionsFor(nearest, now) : false
+  const effectiveThreatLevel = threatLevel
   const nearbyThreat = Boolean(nearest && d < ALERT_DISTANCE && !nearestIsCalm)
   updateFear(creature, dt, nearest, d, nearestIsCalm)
   updateEnergy(creature, dt)
 
   const visitorTooClose = visitors.some((item) =>
-    item.active && distance(item.x, item.y, creature.x, creature.y) <= TOUCH_DISTANCE
+    item.active &&
+    !calmOptionsFor(item, now) &&
+    distance(item.x, item.y, creature.x, creature.y) <= TOUCH_DISTANCE
   )
 
-  if (visitorTooClose) {
+  if (visitorTooClose || effectiveThreatLevel >= .3 || curiosityTargetIsDisturbed) {
     changeState(creature, "FLEE")
   } else if (creature.state === "FLEE" && d < SAFE_DISTANCE &&
              !(nearestIsCalm && creature.fear < .55)) {
@@ -518,7 +627,7 @@ function updateButterfly(creature, dt, now) {
     changeState(creature, "FLEE")
   } else if (
     !nearbyThreat &&
-    calmOptions.length &&
+    isCalm &&
     creature.fear < .58
   ) {
     if (creature.state !== "CURIOUS") changeState(creature, "CURIOUS")
@@ -605,6 +714,11 @@ function updateButterfly(creature, dt, now) {
     }
   }
 
+  if (creature.isOrienting) {
+    tx = creature.x
+    ty = creature.y
+    speed = 0
+  }
   const deltaX = tx - creature.x
   const deltaY = ty - creature.y
   const len = Math.hypot(deltaX, deltaY)
@@ -616,7 +730,18 @@ function updateButterfly(creature, dt, now) {
   creature.vy += (desiredVY - creature.vy) * blend
   creature.x = clamp(creature.x + creature.vx * dt, 26, WORLD_W - 26)
   creature.y = clamp(creature.y + creature.vy * dt, 55, WORLD_H - 55)
+  updateButterflyHeading(creature, dt)
   creature.flutterPhase += dt * (creature.state === "FLEE" ? 22 : 12)
+}
+function updateButterflyHeading(creature, dt) {
+  const movementSpeed = Math.hypot(creature.vx, creature.vy)
+  if (creature.isOrienting || movementSpeed <= 8) return
+  const targetAngle = Math.atan2(creature.vy, creature.vx) + Math.PI / 2
+  const angleDifference = Math.atan2(
+    Math.sin(targetAngle - creature.bodyAngle),
+    Math.cos(targetAngle - creature.bodyAngle)
+  )
+  creature.bodyAngle += angleDifference * (1 - Math.exp(-creature.headingResponse * dt))
 }
 function updateEnvironment(dt, now) {
   if (now - lastDisturbanceTime > 800) forestDisturbance = Math.max(0, forestDisturbance - dt * .18)
@@ -626,145 +751,159 @@ function updateEnvironment(dt, now) {
   }
 
   const calmOptions = calmVisitors(now)
-  const safeCalmOptions = calmOptions.filter((target) => !visitorIsDisturbed(target, now))
   const birdHavens = visitors.filter((target) =>
     target.active && target.havenType === "bird"
   )
-  if (birdExplorationGroup.size === 0 && safeCalmOptions.length) {
-    const availableBirds = birds.filter((bird) =>
-      !bird.flight &&
-      !bird.curiousVisitorId &&
-      now >= bird.nextVisitorSwitchAt
+
+  if (birdCuriosityId !== null) {
+    const curiousBird = birds.find((bird) => bird.id === birdCuriosityId)
+    const target = visitorById(
+      curiousBird?.curiousVisitorId ?? curiousBird?.flight?.toVisitorId
     )
-    if (availableBirds.length) {
-      const shuffled = availableBirds
-        .map((bird) => ({ bird, order: Math.random() }))
-        .sort((a, b) => a.order - b.order)
-      const exploringCount = 1 + Math.floor(
-        Math.random() * Math.min(3, availableBirds.length)
-      )
-      birdExplorationGroup = new Set(
-        shuffled.slice(0, exploringCount).map(({ bird }) => bird.id)
-      )
+    const curiosityStillValid = target &&
+      (target.havenType === "bird" ||
+        (calmOptions.some((item) => item.id === target.id) &&
+          !visitorIsDisturbed(target, now)))
+    if (!curiosityStillValid || now >= (curiousBird?.nextVisitorSwitchAt ?? Infinity)) {
+      if (curiousBird && !curiousBird.havenVisitorId) {
+        const currentPosition = curiousBird.flight
+          ? birdFlightPosition(curiousBird, now)
+          : curiousBird.curiousVisitorId
+            ? birdVisitorPosition(curiousBird, target, now)
+            : null
+        curiousBird.flight = null
+        curiousBird.curiousVisitorId = null
+        startBirdFlight(curiousBird, null, now, currentPosition)
+      }
+      birdCuriosityId = null
+      nextBirdCuriosityAt = now + 2500 + Math.random() * 2500
     }
   }
 
   for (const hiddenBird of birds) {
+    if (!hiddenBird.flight && !hiddenBird.curiousVisitorId) {
+      const perchPosition = birdTreePosition(hiddenBird)
+      const perchThreat = ThreatProvider.getThreatAt(perchPosition.x, perchPosition.y)
+      hiddenBird.readiness = perchThreat >= .3 && perchThreat < .6
+    } else {
+      hiddenBird.readiness = false
+    }
+    updateBirdHeading(hiddenBird, now, dt)
+
     const currentHaven = visitorById(hiddenBird.havenVisitorId)
-    const havenTarget = currentHaven?.havenType === "bird"
-      ? currentHaven
-      : chooseVisitor(birdHavens, hiddenBird.havenVisitorId)
-    if (havenTarget) {
-      const newHavenTarget = hiddenBird.havenVisitorId !== havenTarget.id
-      hiddenBird.havenVisitorId = havenTarget.id
-      birdExplorationGroup.delete(hiddenBird.id)
-      const isAlreadyHeadingToHaven =
-        hiddenBird.flight?.toVisitorId === havenTarget.id &&
-        hiddenBird.flight.targetHavenType === "bird"
-      const isAlreadyAtHaven =
-        hiddenBird.curiousVisitorId === havenTarget.id &&
-        hiddenBird.orbitHavenType === "bird"
-      if (newHavenTarget || (!isAlreadyHeadingToHaven && !isAlreadyAtHaven)) {
-        startBirdFlight(hiddenBird, havenTarget, now)
-      }
-    } else if (hiddenBird.havenVisitorId) {
+    if (hiddenBird.havenVisitorId && currentHaven?.havenType !== "bird") {
+      const endedHavenId = hiddenBird.havenVisitorId
       hiddenBird.havenVisitorId = null
-      if (hiddenBird.flight?.toVisitorId || hiddenBird.curiousVisitorId) {
-        startBirdFlight(hiddenBird, null, now)
+      if (hiddenBird.curiousVisitorId === endedHavenId ||
+          hiddenBird.flight?.toVisitorId === endedHavenId) {
+        const currentPosition = hiddenBird.flight
+          ? birdFlightPosition(hiddenBird, now)
+          : currentHaven
+            ? birdVisitorPosition(hiddenBird, currentHaven, now)
+            : birdTreePosition(hiddenBird)
+        hiddenBird.flight = null
+        hiddenBird.curiousVisitorId = null
+        startBirdFlight(hiddenBird, null, now, currentPosition)
+        nextBirdCuriosityAt = now + 2500 + Math.random() * 2500
+        continue
       }
     }
-
-    if (hiddenBird.flight?.toVisitorId) {
-      const target = visitorById(hiddenBird.flight.toVisitorId)
-      const isBirdHaven = target?.havenType === "bird" &&
-        hiddenBird.havenVisitorId === target.id
-      const isSafeCalmVisitor = target &&
-        !target.havenType &&
-        calmOptions.some((item) => item.id === target.id) &&
-        !visitorIsDisturbed(target, now)
-      if (!isBirdHaven && !isSafeCalmVisitor) {
-        startBirdFlight(hiddenBird, null, now)
+    const havenTarget = visitorById(hiddenBird.havenVisitorId) ??
+      chooseVisitor(birdHavens, hiddenBird.havenVisitorId)
+    if (havenTarget) {
+      const alreadyAtHaven = hiddenBird.curiousVisitorId === havenTarget.id
+      const alreadyFlyingToHaven = hiddenBird.flight?.toVisitorId === havenTarget.id
+      if (!alreadyAtHaven && !alreadyFlyingToHaven) {
+        const currentPosition = hiddenBird.flight
+          ? birdFlightPosition(hiddenBird, now)
+          : hiddenBird.curiousVisitorId
+            ? birdVisitorPosition(
+              hiddenBird,
+              visitorById(hiddenBird.curiousVisitorId),
+              now
+            )
+            : null
+        hiddenBird.flight = null
+        hiddenBird.curiousVisitorId = null
+        startBirdFlight(hiddenBird, havenTarget, now, currentPosition)
+        continue
       }
+      if (alreadyAtHaven) continue
     }
 
-    if (hiddenBird.flight && now - hiddenBird.flight.startTime >= hiddenBird.flight.duration) {
-      const finishedFlight = hiddenBird.flight
-      if (finishedFlight.toVisitorId) {
-        const target = visitorById(finishedFlight.toVisitorId)
-        const isBirdHaven = target?.havenType === "bird" &&
-          hiddenBird.havenVisitorId === target.id
-        const isSafeCalmVisitor = target &&
-          !target.havenType &&
-          calmOptions.some((item) => item.id === target.id) &&
-          !visitorIsDisturbed(target, now)
-        if (isBirdHaven || isSafeCalmVisitor) {
-          alignBirdOrbit(hiddenBird, target, birdFlightPosition(hiddenBird, now), now)
-          hiddenBird.curiousVisitorId = target.id
-          hiddenBird.orbitHavenType = target.havenType
-          hiddenBird.nextVisitorSwitchAt = now + 4500 + Math.random() * 4000
-        } else {
-          startBirdFlight(hiddenBird, null, now)
+    if (hiddenBird.flight) {
+      if (hiddenBird.flight.toVisitorId) {
+        const target = visitorById(hiddenBird.flight.toVisitorId)
+        const stillValid = target &&
+          (target.havenType === "bird" ||
+            (calmOptions.some((item) => item.id === target.id) &&
+              !visitorIsDisturbed(target, now)))
+        if (!stillValid) {
+          const currentPosition = birdFlightPosition(hiddenBird, now)
+          hiddenBird.flight = null
+          hiddenBird.curiousVisitorId = null
+          if (birdCuriosityId === hiddenBird.id) {
+            birdCuriosityId = null
+            nextBirdCuriosityAt = now + 2500 + Math.random() * 2500
+          }
+          startBirdFlight(hiddenBird, null, now, currentPosition)
           continue
         }
-      } else {
-        hiddenBird.treeIndex = finishedFlight.toTreeIndex
-        hiddenBird.curiousVisitorId = null
-        if (finishedFlight.waitBeforeVisiting) {
-          hiddenBird.nextVisitorSwitchAt = now + 2500
-          birdExplorationGroup.delete(hiddenBird.id)
-        }
       }
-      hiddenBird.flight = null
-      hiddenBird.revealed = false
-      hiddenBird.nextMoveAt = now + 12000 + Math.random() * 18000
+      if (now - hiddenBird.flight.startTime < hiddenBird.flight.duration) continue
+      const flight = hiddenBird.flight
+      if (flight.toVisitorId) {
+        const target = visitorById(flight.toVisitorId)
+        if (target && (target.havenType === "bird" || calmOptionsFor(target, now))) {
+          hiddenBird.flight = null
+          hiddenBird.revealed = false
+          hiddenBird.curiousVisitorId = target.id
+          if (target.havenType === "bird") {
+            birdCuriosityId = null
+          } else {
+            hiddenBird.nextVisitorSwitchAt = now + 4500 + Math.random() * 4000
+          }
+        } else {
+          const currentPosition = birdFlightPosition(hiddenBird, now)
+          hiddenBird.flight = null
+          hiddenBird.revealed = false
+          startBirdFlight(hiddenBird, null, now, currentPosition)
+        }
+      } else {
+        hiddenBird.flight = null
+        hiddenBird.revealed = false
+        hiddenBird.treeIndex = flight.toTreeIndex
+      }
+      continue
     }
-    if (hiddenBird.flight) continue
 
     if (hiddenBird.curiousVisitorId) {
       const currentTarget = visitorById(hiddenBird.curiousVisitorId)
-      if (currentTarget?.havenType === "bird" &&
-          hiddenBird.havenVisitorId === currentTarget.id) continue
-      const stillCalm = currentTarget &&
-        !currentTarget.havenType &&
+      const isCalm = currentTarget &&
         calmOptions.some((item) => item.id === currentTarget.id) &&
         !visitorIsDisturbed(currentTarget, now)
-      if (!stillCalm) {
-        startBirdFlight(hiddenBird, null, now)
-      } else if (now >= hiddenBird.nextVisitorSwitchAt) {
-        const nextTarget = chooseVisitor(calmOptions, hiddenBird.curiousVisitorId)
-        if (nextTarget) startBirdFlight(hiddenBird, nextTarget, now)
-        else hiddenBird.nextVisitorSwitchAt = now + 4500 + Math.random() * 4000
-      }
+      if (!isCalm) startBirdFlight(hiddenBird, null, now)
       continue
     }
 
-    if (birdExplorationGroup.has(hiddenBird.id) &&
-      safeCalmOptions.length &&
-      now >= hiddenBird.nextVisitorSwitchAt) {
-      startBirdFlight(hiddenBird, chooseVisitor(safeCalmOptions), now)
-      continue
-    }
-
-    const currentTree = trees[hiddenBird.treeIndex]
-    const visitorIsFarFromBird = visitors.every((item) =>
-      distance(item.x, item.y, currentTree.x, currentTree.y) > 260
-    )
-
-    // Birds relocate occasionally, only while the visitor is far away.
-    if (now >= hiddenBird.nextMoveAt && visitorIsFarFromBird) {
-      const candidates = trees
-        .map((tree, index) => index)
-        .filter((index) =>
-          index !== hiddenBird.treeIndex &&
-          !birds.some((other) => other !== hiddenBird &&
-            (other.treeIndex === index || other.flight?.toTreeIndex === index))
-        )
-
-      if (candidates.length) {
-        const destination = candidates[Math.floor(Math.random() * candidates.length)]
-        startBirdTreeFlight(hiddenBird, destination, now, 1100 + Math.random() * 450)
+    if (birdCuriosityId === null && now >= nextBirdCuriosityAt && calmOptions.length) {
+      const undisturbedVisitors = calmOptions.filter((target) =>
+        !visitorIsDisturbed(target, now)
+      )
+      const target = chooseVisitor(undisturbedVisitors)
+      const availableBirds = birds.filter((bird) =>
+        !bird.flight && !bird.curiousVisitorId && !bird.havenVisitorId
+      )
+      if (target && availableBirds.length) {
+        const curiousBird = availableBirds[Math.floor(Math.random() * availableBirds.length)]
+        birdCuriosityId = curiousBird.id
+        curiousBird.nextVisitorSwitchAt = Infinity
+        startBirdFlight(curiousBird, target, now)
+        continue
       }
-      hiddenBird.nextMoveAt = now + 14000 + Math.random() * 22000
+    }
+    if (hiddenBird.flight || hiddenBird.havenVisitorId) {
+      continue
     }
   }
 }
@@ -774,7 +913,10 @@ function birdTreePosition(bird) {
   return { x: tree.x + tree.r * .22, y: tree.y + tree.r * .22 }
 }
 function startBirdTreeFlight(bird, destinationTreeIndex, now, duration) {
-  const from = birdTreePosition(bird)
+  const currentTarget = visitorById(bird.curiousVisitorId)
+  const from = currentTarget
+    ? birdVisitorPosition(bird, currentTarget, now)
+    : birdTreePosition(bird)
   const destination = birdTreePosition({ treeIndex: destinationTreeIndex })
   const travelDistance = distance(from.x, from.y, destination.x, destination.y)
   bird.flight = {
@@ -784,24 +926,48 @@ function startBirdTreeFlight(bird, destinationTreeIndex, now, duration) {
     toY: destination.y,
     arcHeight: clamp(travelDistance * .22, 30, 95),
     toVisitorId: null,
-    waitBeforeVisiting: false,
     toTreeIndex: destinationTreeIndex,
     startTime: now,
     duration
   }
+  bird.curiousVisitorId = null
+  bird.havenVisitorId = null
+}
+function startBirdFlight(bird, target, now, currentPosition = null) {
+  const currentTarget = visitorById(bird.curiousVisitorId)
+  const from = currentPosition ?? (bird.flight
+    ? birdFlightPosition(bird, now)
+    : currentTarget
+      ? birdVisitorPosition(bird, currentTarget, now)
+      : birdTreePosition(bird))
+  let destination
+  if (target) {
+    const orbitAngle = bird.orbitAngle + now * .0011 + .4
+    destination = {
+      x: target.x + Math.cos(orbitAngle) * 44,
+      y: target.y - 28 + Math.sin(orbitAngle) * 22
+    }
+    bird.havenVisitorId = target.havenType === "bird" ? target.id : null
+  } else {
+    destination = birdTreePosition(bird)
+    bird.havenVisitorId = null
+  }
+  const travelDistance = distance(from.x, from.y, destination.x, destination.y)
+  bird.flight = {
+    fromX: from.x,
+    fromY: from.y,
+    toX: destination.x,
+    toY: destination.y,
+    arcHeight: clamp(travelDistance * .22, 30, 95),
+    toVisitorId: target?.id ?? null,
+    toTreeIndex: bird.treeIndex,
+    startTime: now,
+    duration: clamp(travelDistance / 230, 1.2, 3.5) * 1000
+  }
+  bird.curiousVisitorId = null
+  bird.orbitAngle += Math.PI * (0.7 + Math.random() * .6)
 }
 function birdVisitorPosition(bird, target, now) {
-  const havenType = bird.curiousVisitorId === target.id
-    ? bird.orbitHavenType ?? target.havenType
-    : target.havenType
-  if (havenType === "bird") {
-    const angle = bird.orbitAngle + now * .00025
-    const radius = 14 + (bird.id % 3) * 6
-    return {
-      x: target.x + Math.cos(angle) * radius,
-      y: target.y - 6 + Math.sin(angle) * radius * .7
-    }
-  }
   const angle = bird.orbitAngle + now * .0011
   return {
     x: target.x + Math.cos(angle) * 44,
@@ -820,54 +986,33 @@ function birdFlightPosition(bird, now) {
   flight.lastY = position.y
   return position
 }
-function alignBirdOrbit(bird, target, position, now) {
-  if (target.havenType === "bird") {
-    const radius = 14 + (bird.id % 3) * 6
-    const angle = Math.atan2(
-      (position.y - target.y + 6) / (radius * .7),
-      (position.x - target.x) / radius
-    )
-    bird.orbitAngle = angle - now * .00025
-    return
-  }
-  const angle = Math.atan2(
-    (position.y - target.y + 28) / 22,
-    (position.x - target.x) / 44
-  )
-  bird.orbitAngle = angle - now * .0011
-}
-function startBirdFlight(bird, target, now) {
-  const currentTarget = visitorById(bird.curiousVisitorId)
-  const returningFromVisitor = !target &&
-    (Boolean(currentTarget) || birdExplorationGroup.has(bird.id))
-  const from = bird.flight
-    ? birdFlightPosition(bird, now)
-    : currentTarget
-      ? birdVisitorPosition(bird, currentTarget, now)
-      : birdTreePosition(bird)
-  bird.orbitHavenType = null
-  let destination
-  if (target) {
-    destination = birdVisitorPosition(bird, target, now + 3500)
+function updateBirdHeading(bird, now, dt) {
+  let directionX = 0
+  let directionY = 0
+  if (bird.flight) {
+    const progress = clamp((now - bird.flight.startTime) / bird.flight.duration, 0, 1)
+    directionX = bird.flight.toX - bird.flight.fromX
+    directionY = bird.flight.toY - bird.flight.fromY -
+      Math.cos(progress * Math.PI) * Math.PI * bird.flight.arcHeight
+  } else if (bird.curiousVisitorId) {
+    const target = visitorById(bird.curiousVisitorId)
+    if (target) {
+      const position = birdVisitorPosition(bird, target, now)
+      const nextPosition = birdVisitorPosition(bird, target, now + 16)
+      directionX = nextPosition.x - position.x
+      directionY = nextPosition.y - position.y
+    }
   } else {
-    destination = birdTreePosition(bird)
+    directionX = Math.cos(bird.headingAngle)
+    directionY = Math.sin(bird.headingAngle)
   }
-  const travelDistance = distance(from.x, from.y, destination.x, destination.y)
-  bird.flight = {
-    fromX: from.x,
-    fromY: from.y,
-    toX: destination.x,
-    toY: destination.y,
-    arcHeight: clamp(travelDistance * .22, 30, 95),
-    toVisitorId: target?.id ?? null,
-    targetHavenType: target?.havenType ?? null,
-    waitBeforeVisiting: returningFromVisitor,
-    toTreeIndex: bird.treeIndex,
-    startTime: now,
-    duration: clamp(travelDistance / 230, 1.2, 3.5) * 1000
-  }
-  bird.curiousVisitorId = null
-  bird.orbitAngle += Math.PI * (0.7 + Math.random() * .6)
+  if (Math.hypot(directionX, directionY) < .001) return
+  const targetAngle = Math.atan2(directionY, directionX)
+  const difference = Math.atan2(
+    Math.sin(targetAngle - bird.headingAngle),
+    Math.cos(targetAngle - bird.headingAngle)
+  )
+  bird.headingAngle += difference * (1 - Math.exp(-12 * dt))
 }
 function drawBackground(now) {
   const bg = ctx.createLinearGradient(0, 0, 0, WORLD_H)
@@ -982,7 +1127,7 @@ function drawTree(tree, index, now) {
       .map((item) => distance(item.x, item.y, tree.x, tree.y)), Infinity)
 
     // Hide perched birds while the visitor is close.
-    if (visitorDistance <= 260) continue;
+    if (visitorDistance <= 110) continue;
 
     const peeking =
       0.76 + Math.sin(now * 0.0012 + hiddenBird.phase) * 0.08;
@@ -993,7 +1138,9 @@ function drawTree(tree, index, now) {
       now,
       peeking,
       false,
-      hiddenBird.phase
+      hiddenBird.phase,
+      hiddenBird.readiness,
+      hiddenBird.headingAngle
     );
   }
 }
@@ -1003,45 +1150,56 @@ function drawFlyingBirds(now) {
     if (!hiddenBird.flight) continue;
 
     const position = birdFlightPosition(hiddenBird, now)
-    drawBirdAt(position.x, position.y, now, 1, true, hiddenBird.phase);
+    drawBirdAt(position.x, position.y, now, 1, true, hiddenBird.phase, false, hiddenBird.headingAngle);
   }
 }
-
 function drawCuriousBirds(now) {
-  for (const hiddenBird of birds) {
-    if (hiddenBird.flight || !hiddenBird.curiousVisitorId) continue
-    const target = visitorById(hiddenBird.curiousVisitorId)
+  for (const bird of birds) {
+    if (bird.flight || !bird.curiousVisitorId) continue
+    const target = visitorById(bird.curiousVisitorId)
     if (!target) continue
-    const position = birdVisitorPosition(hiddenBird, target, now)
-    drawBirdAt(position.x, position.y, now, 1, true, hiddenBird.phase)
+    const position = birdVisitorPosition(bird, target, now)
+    drawBirdAt(position.x, position.y, now, 1, true, bird.phase, false, bird.headingAngle)
   }
 }
 
-
-function drawBirdAt(anchorX, anchorY, now, peek, flying = false, phase = 0) {
+function drawBirdAt(anchorX, anchorY, now, peek, flying = false, phase = 0, readiness = false, headingAngle = 0) {
   // The bird remains partly behind leaves until it feels safe enough to peek.
   const x = anchorX + 5
   const y = anchorY + 27 - peek * 21 + Math.sin(now * .006 + phase) * 1.8
-  const flap = Math.sin(now * .018 + phase) * 5
+  const flap = flying
+    ? Math.sin(now * .035 + phase) * .9
+    : readiness
+      ? Math.sin(now * .09 + phase) * .75
+      : 0
+  const bodyWidth = readiness ? 1 + .05 * ((Math.sin(now * .012 + phase) + 1) / 2) : 1
   ctx.save()
   ctx.globalAlpha = flying ? 1 : .25 + peek * .75
   // Tiny perched bird silhouette.
   ctx.strokeStyle = "#d4d19a"; ctx.lineWidth = 2
   ctx.beginPath(); ctx.moveTo(x - 18, y + 10); ctx.lineTo(x + 17, y + 10); ctx.stroke()
+  ctx.translate(x, y)
+  const facingLeft = Math.cos(headingAngle) < 0
+  const tilt = Math.atan2(Math.sin(headingAngle), Math.abs(Math.cos(headingAngle)))
+  ctx.rotate(clamp(tilt, -.65, .65))
+  ctx.scale(facingLeft ? -1 : 1, 1)
   ctx.fillStyle = "#e0d5a0"
-  ctx.beginPath(); ctx.ellipse(x, y, 11, 7, -.15, 0, Math.PI * 2); ctx.fill()
-  ctx.beginPath(); ctx.arc(x + 8, y - 7, 5.5, 0, Math.PI * 2); ctx.fill()
+  ctx.beginPath(); ctx.ellipse(0, 0, 11 * bodyWidth, 7, -.15, 0, Math.PI * 2); ctx.fill()
+  ctx.beginPath(); ctx.arc(8, -7, 5.5, 0, Math.PI * 2); ctx.fill()
   ctx.fillStyle = "#d4a76d"
-  ctx.beginPath(); ctx.moveTo(x + 13, y - 7); ctx.lineTo(x + 20, y - 5); ctx.lineTo(x + 13, y - 3); ctx.closePath(); ctx.fill()
+  ctx.beginPath(); ctx.moveTo(13, -7); ctx.lineTo(20, -5); ctx.lineTo(13, -3); ctx.closePath(); ctx.fill()
   ctx.fillStyle = "#6f9770"
-  ctx.beginPath(); ctx.ellipse(x - 2, y - 2, 5, 9, -.6 + flap * .02, 0, Math.PI * 2); ctx.fill()
+  ctx.beginPath(); ctx.ellipse(-2, -2, 5, 9, -.6 + flap, 0, Math.PI * 2); ctx.fill()
+  ctx.beginPath(); ctx.ellipse(-5, -3, 3.5, 7, .45 - flap * .8, 0, Math.PI * 2); ctx.fill()
   ctx.fillStyle = "#172f26"
-  ctx.beginPath(); ctx.arc(x + 9, y - 8, 1.2, 0, Math.PI * 2); ctx.fill()
+  ctx.beginPath(); ctx.arc(9, -8, 1.2, 0, Math.PI * 2); ctx.fill()
+  ctx.restore()
   if (peek > .55 || flying) {
+    ctx.save()
     ctx.strokeStyle = "rgba(240,224,151,.65)"
     ctx.beginPath(); ctx.arc(x, y, 22 + Math.sin(now * .005 + phase) * 2, 0, Math.PI * 2); ctx.stroke()
+    ctx.restore()
   }
-  ctx.restore()
 }
 function drawFlower(f, now, i) {
   const sway = Math.sin(now * .0018 + i * 1.4) * 2
@@ -1073,7 +1231,7 @@ function drawButterfly(creature, now) {
   // wings
   ctx.save()
   ctx.translate(x, y)
-  ctx.rotate(Math.sin(now * .001 + x * .01) * .06)
+  ctx.rotate(creature.bodyAngle + Math.sin(now * .001 + x * .01) * .06)
   ctx.fillStyle = creature.color
   ctx.strokeStyle = "#f6d6e9"; ctx.lineWidth = 1.5
   ctx.beginPath(); ctx.ellipse(-7, -5, 10 * wingScale, 14, -.5, 0, Math.PI * 2); ctx.fill(); ctx.stroke()
@@ -1214,8 +1372,6 @@ function handleForestClick(clickX, clickY) {
             (bird.treeIndex === index || bird.flight?.toTreeIndex === index))
         )
       birdHere.revealed = true
-      birdExplorationGroup.delete(birdHere.id)
-      birdHere.curiousVisitorId = null
       if (destinationCandidates.length) {
         const destination = destinationCandidates[
           Math.floor(Math.random() * destinationCandidates.length)
