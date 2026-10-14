@@ -12,86 +12,23 @@
         <div class="brand">
           <span class="brand-mark" aria-hidden="true">✳</span>
           <div>
-            <div class="eyebrow">LIVING WORLD · PROTOTYPE</div>
+            <div class="eyebrow">LIVING WORLD</div>
             <h1>A forest that notices you</h1>
           </div>
         </div>
-        <div class="topbar-actions">
-          <span class="live-indicator"><i></i> ECOSYSTEM ACTIVE</span>
-          <a class="back-link" href="/">3D prototype ↗</a>
-        </div>
       </header>
-
-      <main class="layout">
+      <main>
         <section class="scene-panel" aria-label="Interactive forest">
-          <div class="scene-heading">
-            <div>
-              <div class="eyebrow">FIELD OBSERVATION · 01</div>
-              <h2>Take your time. The forest is paying attention.</h2>
-            </div>
-            <div class="scene-hint"><span class="hint-dot"></span> Move your pointer into the forest</div>
-          </div>
           <div class="canvas-wrap">
-            <canvas id="forest-canvas" aria-label="Interactive 2D forest. Move the pointer to approach the butterfly and click trees to discover a bird."></canvas>
-            <div class="canvas-caption"><span>THE WOODLAND</span><span id="presence-label">WAITING FOR A VISITOR</span></div>
-            <div class="toast" id="scene-toast" role="status" aria-live="polite"></div>
-          </div>
-          <div class="interaction-guide">
-            <div class="guide-item"><span class="guide-icon cursor-icon">◎</span><span><b>Approach gently</b><small>The butterfly becomes cautious.</small></span></div>
-            <div class="guide-item"><span class="guide-icon wing-icon">✦</span><span><b>Give it space</b><small>It calms down and returns to a flower.</small></span></div>
-            <div class="guide-item"><span class="guide-icon tree-icon">♧</span><span><b>Explore the trees</b><small>Click a tree to look for a hidden bird.</small></span></div>
+            <canvas id="forest-canvas" aria-label="Interactive 2D forest. Move visitors gently and watch the wildlife respond."></canvas>
           </div>
         </section>
-
-        <aside class="side-panel">
-          <section class="status-card">
-            <div class="card-title-row">
-              <div>
-                <div class="eyebrow">LIVE CREATURE STATUS</div>
-                <h2>Butterfly</h2>
-              </div>
-              <span class="creature-symbol" aria-hidden="true">✧</span>
-            </div>
-            <div class="state-row">
-              <span id="state-dot" class="state-dot"></span>
-              <span id="state-label">RESTING</span>
-              <span id="state-description">Settled among the flowers</span>
-            </div>
-            <div class="meter-block">
-              <div class="meter-label"><span>Fear</span><strong id="fear-value">0%</strong></div>
-              <div class="meter-track"><div id="fear-bar" class="meter-fill fear-fill"></div></div>
-            </div>
-            <div class="meter-block">
-              <div class="meter-label"><span>Energy</span><strong id="energy-value">100%</strong></div>
-              <div class="meter-track"><div id="energy-bar" class="meter-fill energy-fill"></div></div>
-              <p class="meter-note">Energy restores mainly while resting. Minimum reserve: 15%.</p>
-            </div>
-            <div class="card-divider"></div>
-            <div class="observation">
-              <span class="observation-icon">◉</span>
-              <div><div class="eyebrow">FOREST RESPONSE</div><p id="forest-response">Leaves stir softly as the forest waits.</p></div>
-            </div>
-          </section>
-
-          <section class="discovery-card">
-            <div class="discovery-header"><span class="discovery-icon">♧</span><div><div class="eyebrow">HIDDEN LIFE</div><h3>Listen and look closely</h3></div></div>
-            <p id="discovery-copy">Two birds are hidden among the canopy. Watch for a rustle, then click an occupied tree to see what happens.</p>
-            <div class="discovery-status"><span id="bird-status-dot"></span><span id="bird-status">Bird not yet discovered</span></div>
-          </section>
-
-          <section class="principle-card">
-            <div class="eyebrow">THE IDEA</div>
-            <p>The forest isn't a backdrop. It is a living system that responds to your presence.</p>
-            <div class="principle-tags"><span>Notice</span><span>Remember</span><span>Respond</span></div>
-          </section>
-
-          <footer class="side-footer">
-            <span>LOCAL DEMO · NO CAMERA REQUIRED</span>
-            <button id="reset-button" type="button">Reset encounter ↺</button>
-          </footer>
-        </aside>
       </main>
-      <div class="bottom-note"><span class="bottom-pulse"></span> Be curious, not hurried. Give the forest a moment to respond.</div>
+      <footer class="bottom-note"><span class="bottom-pulse"></span> Be curious, not hurried. Give the forest a moment to respond.</footer>
+    </div>
+    <div id="camera-preview-container">
+      <video id="webcam-video" autoplay playsinline muted></video>
+      <span id="camera-status">Camera: Offline</span>
     </div>
     <script type="module" src="/src/demo2d.js"></script>
   </body>
