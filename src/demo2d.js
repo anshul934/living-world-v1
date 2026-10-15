@@ -1,6 +1,7 @@
 import "./demo2d.css"
 import { VisitorInput } from "./interaction/VisitorInput.js"
 import { CameraInput } from "./CameraInput.js"
+import { predictDisturbance } from "./ai/PredictionEngine.js"
 
 const canvas = document.querySelector("#forest-canvas")
 const ctx = canvas.getContext("2d")
@@ -149,6 +150,9 @@ const birds = [
   { id: 4, treeIndex: 1, revealed: false, flight: null, readiness: false, headingAngle: 0, curiousVisitorId: null, havenVisitorId: null, nextVisitorSwitchAt: 0, orbitAngle: 3.7, phase: 3.7 },
   { id: 5, treeIndex: 3, revealed: false, flight: null, readiness: false, headingAngle: 0, curiousVisitorId: null, havenVisitorId: null, nextVisitorSwitchAt: 0, orbitAngle: 5.1, phase: 5.1 }
 ]
+// Last actual displayed position of each bird.
+// Needed when a visitor disappears during investigation.
+const birdLastPositions = new Map()
 const motes = Array.from({ length: 36 }, (_, i) => ({
   x: (i * 197.3 + 53) % WORLD_W,
   y: (i * 91.7 + 21) % WORLD_H,
@@ -545,6 +549,43 @@ function updateButterflyHaven(creature, target, dt, index) {
   creature.energy = clamp(creature.energy + .025 * dt, MIN_ENERGY, 1)
   creature.flutterPhase += dt * 7
 }
+
+const predictionLogTimes = new Map()
+function logDisturbancePrediction(creature, nearest, d, approach, now) {
+  const prediction = predictDisturbance({
+    distance: d,
+    approachSpeed: approach,
+    fear: creature.fear,
+    // Calm duration tracking will be added after this baseline is validated.
+    calmDurationMs: 0
+  })
+  const creatureIndex = butterflies.indexOf(creature)
+
+const creatureKey =
+  creature.id ??
+  (creatureIndex >= 0
+    ? `butterfly-${creatureIndex + 1}`
+    : "unknown-creature")
+  const lastLogAt = predictionLogTimes.get(creatureKey) ?? -Infinity
+  // Log at most once per second per creature.
+  if (now - lastLogAt >= 1000) {
+    predictionLogTimes.set(creatureKey, now)
+    console.log("[PredictionDiag] DISTURBANCE", {
+      time: Math.round(now),
+      creatureId: creatureKey,
+      state: creature.state,
+      visitorId: nearest?.id ?? null,
+      distance: Number.isFinite(d) ? Math.round(d) : null,
+      approachSpeed: Math.round(approach),
+      fear: Number(creature.fear.toFixed(3)),
+      riskScore: prediction.riskScore,
+      predictedDisturbance: prediction.predictedDisturbance,
+      horizonMs: prediction.horizonMs
+    })
+  }
+  return prediction
+}
+
 function updateButterfly(creature, dt, now) {
   const threatLevel = ThreatProvider.getThreatAt(creature.x, creature.y, true)
   const threatVector = ThreatProvider.getThreatVectorAt(creature.x, creature.y, true)
@@ -589,6 +630,7 @@ function updateButterfly(creature, dt, now) {
   const d = nearest ? distance(nearest.x, nearest.y, creature.x, creature.y) : Infinity
   const approach = nearest?.approachSpeed ?? 0
   const calmOptions = calmVisitors(now)
+  logDisturbancePrediction(creature, nearest, d, approach, now)
   let curiosityTarget = visitorById(creature.curiosityVisitorId)
   if (
     calmOptions.length &&
@@ -766,6 +808,44 @@ function updateEnvironment(dt, now) {
           !visitorIsDisturbed(target, now)))
     if (!curiosityStillValid || now >= (curiousBird?.nextVisitorSwitchAt ?? Infinity)) {
       if (curiousBird && !curiousBird.havenVisitorId) {
+        
+        
+        const curiosityTimerExpired =
+          now >= (curiousBird?.nextVisitorSwitchAt ?? Infinity)
+
+        console.log("[BirdCuriosityDiag] END", {
+          time: Math.round(now),
+          birdId: curiousBird?.id ?? birdCuriosityId,
+          visitorId: target?.id ?? null,
+          sessionDurationMs: curiousBird
+            ? Math.round(
+                now - (birdCuriosityStartTimes.get(curiousBird.id) ?? now)
+              )
+            : null,
+          investigationDurationMs: curiousBird &&
+            birdInvestigationStartTimes.has(curiousBird.id)
+              ? Math.round(
+                  now - birdInvestigationStartTimes.get(curiousBird.id)
+                )
+              : null,  
+          reason: curiosityTimerExpired
+            ? "INVESTIGATION_TIMER_EXPIRED"
+            : !target
+              ? "TARGET_MISSING"
+              : visitorIsDisturbed(target, now)
+                ? "VISITOR_DISTURBED"
+                : "CURIOSITY_NO_LONGER_VALID"
+        })
+        
+        if (curiousBird) {
+          birdCuriosityStartTimes.delete(curiousBird.id)
+          birdInvestigationStartTimes.delete(curiousBird.id)
+        }
+
+
+        lastBirdCuriosityEndAt = now
+
+
         const currentPosition = curiousBird.flight
           ? birdFlightPosition(curiousBird, now)
           : curiousBird.curiousVisitorId
@@ -858,6 +938,15 @@ function updateEnvironment(dt, now) {
           hiddenBird.flight = null
           hiddenBird.revealed = false
           hiddenBird.curiousVisitorId = target.id
+          if (target.havenType !== "bird") {
+            birdInvestigationStartTimes.set(hiddenBird.id, now)
+
+            console.log("[BirdCuriosityDiag] ARRIVED", {
+              time: Math.round(now),
+              birdId: hiddenBird.id,
+              visitorId: target.id
+            })
+          }
           if (target.havenType === "bird") {
             birdCuriosityId = null
           } else {
@@ -894,19 +983,126 @@ function updateEnvironment(dt, now) {
       const availableBirds = birds.filter((bird) =>
         !bird.flight && !bird.curiousVisitorId && !bird.havenVisitorId
       )
-      if (target && availableBirds.length) {
-        const curiousBird = availableBirds[Math.floor(Math.random() * availableBirds.length)]
-        birdCuriosityId = curiousBird.id
-        curiousBird.nextVisitorSwitchAt = Infinity
-        startBirdFlight(curiousBird, target, now)
-        continue
-      }
+      
+    if (target && availableBirds.length) {
+      const curiousBird =
+        availableBirds[Math.floor(Math.random() * availableBirds.length)]
+
+      console.log("[BirdCuriosityDiag] START", {
+        time: Math.round(now),
+        birdId: curiousBird.id,
+        visitorId: target.id,
+        gapSincePreviousEndMs: lastBirdCuriosityEndAt === null
+          ? null
+          : Math.round(now - lastBirdCuriosityEndAt),
+        calmVisitorCount: calmOptions.length,
+        eligibleVisitorCount: undisturbedVisitors.length,
+        availableBirdCount: availableBirds.length,
+        scheduledTime: Math.round(nextBirdCuriosityAt),
+        waitOverdueMs: Math.round(now - nextBirdCuriosityAt)
+      })
+      birdCuriosityStartTimes.set(curiousBird.id, now)
+
+      birdCuriosityId = curiousBird.id
+      curiousBird.nextVisitorSwitchAt = Infinity
+      startBirdFlight(curiousBird, target, now)
+      continue
+    }
+
     }
     if (hiddenBird.flight || hiddenBird.havenVisitorId) {
       continue
     }
   }
 }
+
+const birdCuriosityStartTimes = new Map()
+let lastBirdCuriosityEndAt = null
+const birdInvestigationStartTimes = new Map()
+const previousBirdDiagnosticStates = new Map()
+function getBirdDiagnosticState(bird) {
+  if (bird.flight) {
+    return bird.flight.toVisitorId != null
+      ? "FLYING_TO_VISITOR"
+      : "FLYING_TO_TREE"
+  }
+
+  if (bird.curiousVisitorId != null) {
+    return "INVESTIGATING_VISITOR"
+  }
+
+  if (bird.havenVisitorId != null) {
+    return "AT_BIRD_HAVEN"
+  }
+
+  if (bird.readiness) {
+    return "PERCHED_READINESS_FLUTTER"
+  }
+
+  return "PERCHED"
+}
+
+
+function logBirdStateChanges(now) {
+  for (const bird of birds) {
+    const state = getBirdDiagnosticState(bird)
+    const previousState = previousBirdDiagnosticStates.get(bird.id)    
+    if (
+      previousState === "FLYING_TO_VISITOR" &&
+      state === "FLYING_TO_TREE"
+    ) {
+      console.log("[BirdCuriosityDiag] RETURN_TO_TREE", {
+        time: Math.round(now),
+        birdId: bird.id,
+        visitorId: bird.curiousVisitorId ?? null,
+        sharedCuriosityOwner: birdCuriosityId,
+        reason: birdCuriosityId === bird.id
+          ? "SHARED_CURIOSITY_OWNER_STILL_ASSIGNED"
+          : "SHARED_CURIOSITY_OWNER_ALREADY_CLEARED"
+      })
+    }
+
+    // Do not print anything when this bird's state has not changed.
+    if (previousState === state) {
+      continue
+    }
+
+    // Save the new state before the next animation frame.
+    previousBirdDiagnosticStates.set(bird.id, state)
+
+    // Calculate the threat score at this bird's current tree.
+    const perch = birdTreePosition(bird)
+    const threat = ThreatProvider.getThreatAt(perch.x, perch.y)
+
+    // Describe the bird's destination, if it is flying.
+    let destination = "none"
+
+    if (bird.flight) {
+      destination = bird.flight.toVisitorId != null
+        ? `visitor:${bird.flight.toVisitorId}`
+        : `tree:${bird.flight.toTreeIndex}`
+    }
+
+    const visitorTarget =
+      bird.curiousVisitorId ??
+      bird.flight?.toVisitorId ??
+      "none"
+
+    console.log(
+      `[BirdDiag] ${Math.round(now)}ms` +
+      ` | bird=${bird.id}` +
+      ` | ${previousState ?? "START"} -> ${state}` +
+      ` | tree=${bird.treeIndex}` +
+      ` | destination=${destination}` +
+      ` | visitorTarget=${visitorTarget}` +
+      ` | revealed=${bird.revealed}` +
+      ` | readiness=${bird.readiness}` +
+      ` | perchThreat=${threat.toFixed(2)}`
+    )
+  }
+}
+
+
 
 function birdTreePosition(bird) {
   const tree = trees[bird.treeIndex]
@@ -935,11 +1131,16 @@ function startBirdTreeFlight(bird, destinationTreeIndex, now, duration) {
 }
 function startBirdFlight(bird, target, now, currentPosition = null) {
   const currentTarget = visitorById(bird.curiousVisitorId)
-  const from = currentPosition ?? (bird.flight
-    ? birdFlightPosition(bird, now)
-    : currentTarget
-      ? birdVisitorPosition(bird, currentTarget, now)
-      : birdTreePosition(bird))
+  const lastKnownPosition = birdLastPositions.get(bird.id)
+
+  const from = currentPosition ?? (
+    bird.flight
+      ? birdFlightPosition(bird, now)
+      : currentTarget
+        ? birdVisitorPosition(bird, currentTarget, now)
+        : lastKnownPosition ?? birdTreePosition(bird)
+  )
+
   let destination
   if (target) {
     const orbitAngle = bird.orbitAngle + now * .0011 + .4
@@ -967,13 +1168,36 @@ function startBirdFlight(bird, target, now, currentPosition = null) {
   bird.curiousVisitorId = null
   bird.orbitAngle += Math.PI * (0.7 + Math.random() * .6)
 }
+
 function birdVisitorPosition(bird, target, now) {
-  const angle = bird.orbitAngle + now * .0011
+  // A missing or invalid visitor must never send a bird to (0, 0).
+  if (
+    !target ||
+    !Number.isFinite(target.x) ||
+    !Number.isFinite(target.y)
+  ) {
+    const lastPosition = birdLastPositions.get(bird.id)
+
+    if (
+      lastPosition &&
+      Number.isFinite(lastPosition.x) &&
+      Number.isFinite(lastPosition.y)
+    ) {
+      return { x: lastPosition.x, y: lastPosition.y }
+    }
+
+    // Safe initialization fallback if the bird has never investigated.
+    return birdTreePosition(bird)
+  }
+
+  const angle = (bird.orbitAngle || 0) + now * 0.0011
+
   return {
     x: target.x + Math.cos(angle) * 44,
     y: target.y - 28 + Math.sin(angle) * 22
   }
 }
+
 function birdFlightPosition(bird, now) {
   const flight = bird.flight
   const progress = smoothstep(0, 1, clamp((now - flight.startTime) / flight.duration, 0, 1))
@@ -1153,15 +1377,37 @@ function drawFlyingBirds(now) {
     drawBirdAt(position.x, position.y, now, 1, true, hiddenBird.phase, false, hiddenBird.headingAngle);
   }
 }
+
+
 function drawCuriousBirds(now) {
   for (const bird of birds) {
     if (bird.flight || !bird.curiousVisitorId) continue
+
     const target = visitorById(bird.curiousVisitorId)
     if (!target) continue
+
     const position = birdVisitorPosition(bird, target, now)
-    drawBirdAt(position.x, position.y, now, 1, true, bird.phase, false, bird.headingAngle)
+
+    // Save the actual position used for this frame.
+    birdLastPositions.set(bird.id, {
+      x: position.x,
+      y: position.y
+    })
+
+    drawBirdAt(
+      position.x,
+      position.y,
+      now,
+      1,
+      true,
+      bird.phase,
+      false,
+      bird.headingAngle
+    )
   }
 }
+
+
 
 function drawBirdAt(anchorX, anchorY, now, peek, flying = false, phase = 0, readiness = false, headingAngle = 0) {
   // The bird remains partly behind leaves until it feels safe enough to peek.
@@ -1408,6 +1654,7 @@ function frame(now) {
   // 4. Run existing updates & renders
   for (const creature of butterflies) updateButterfly(creature, dt, now)
   updateEnvironment(dt, now)
+  logBirdStateChanges(now)
   draw(now)
   requestAnimationFrame(frame)
 }

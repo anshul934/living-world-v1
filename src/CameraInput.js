@@ -1,15 +1,17 @@
-
 import {
   FilesetResolver,
   HandLandmarker
 } from "@mediapipe/tasks-vision";
 
-const DEAD_ZONE = 0.008;
-const SMOOTHING_TIME_CONSTANT = 0.12;
+// Velocity-Adaptive Smoothing Constants (Time Constants in Seconds)
+const SMOOTHING_TC_SLOW = 0.12;  // Heavy smoothing when still (prevents jitter)
+const SMOOTHING_TC_FAST = 0.015; // Minimal smoothing when moving fast (eliminates lag)
+const VELOCITY_THRESHOLD = 1.2;  // Speed in norm-units/sec where max responsiveness kicks in
+
+const DEAD_ZONE = 0.003;         // Reduced so rapid acceleration isn't ignored
 const TRACKING_GRACE_MS = 140;
 const GESTURE_CONFIRMATION_MS = 140;
 
-// Pinch begins below this distance and ends above RELEASE_THRESHOLD.
 const PINCH_THRESHOLD = 0.06;
 const RELEASE_THRESHOLD = 0.09;
 
@@ -49,10 +51,12 @@ export class CameraInput {
     try {
       this.setStatus("Requesting Camera...");
 
+      // OPTIMIZATION: 480x360 @ 60fps dramatically cuts camera pipe latency
       const stream = await navigator.mediaDevices.getUserMedia({
         video: {
-          width: { ideal: 640 },
-          height: { ideal: 480 },
+          width: { ideal: 480 },
+          height: { ideal: 360 },
+          frameRate: { ideal: 60, max: 60 },
           facingMode: "user"
         },
         audio: false
@@ -67,14 +71,8 @@ export class CameraInput {
 
       if (this.video.videoWidth === 0) {
         await new Promise((resolve, reject) => {
-          this.video.addEventListener("loadeddata", resolve, {
-            once: true
-          });
-          this.video.addEventListener(
-            "error",
-            () => reject(new Error("Camera video failed to load")),
-            { once: true }
-          );
+          this.video.addEventListener("loadeddata", resolve, { once: true });
+          this.video.addEventListener("error", () => reject(new Error("Camera video failed to load")), { once: true });
         });
       }
 
@@ -110,19 +108,15 @@ export class CameraInput {
   }
 
   smoothCoordinate(current, target, alpha) {
-    // Initialize immediately so the visitor doesn't slide in from (0, 0).
     if (current === null) return target;
-
-    // Ignore tiny changes caused by tracking noise.
     if (Math.abs(target - current) < DEAD_ZONE) {
       return current;
     }
-
     return this.lerp(current, target, alpha);
   }
 
   classifyGesture(landmarks) {
-    if (!landmarks || landmarks.length < 21) return null
+    if (!landmarks || landmarks.length < 21) return null;
 
     const wrist = landmarks[0];
     const distanceFromWrist = (point) =>
@@ -137,8 +131,7 @@ export class CameraInput {
       distanceFromWrist(tip) > distanceFromWrist(joint) * 1.12
     );
 
-    if (extended.every(Boolean)) return "open-palm"
-
+    if (extended.every(Boolean)) return "open-palm";
     if (extended.every((isExtended) => !isExtended)) return "fist";
     return null;
   }
@@ -186,6 +179,8 @@ export class CameraInput {
         const thumbTip = landmarks[4];
         const targetX = 1 - indexTip.x;
         const targetY = indexTip.y;
+
+        // BUMPED MATCH DISTANCE: 0.25 -> 0.55 so fast motion doesn't re-assign hand IDs
         const matchingHands = [...this.handStates.entries()]
           .filter(([id, state]) =>
             !currentHands.has(id) &&
@@ -196,36 +191,62 @@ export class CameraInput {
             state,
             distance: Math.hypot(state.normX - targetX, state.normY - targetY)
           }))
-          .filter(({ distance }) => distance <= 0.25)
+          .filter(({ distance }) => distance <= 0.55)
           .sort((a, b) => a.distance - b.distance);
+
         const id = matchingHands[0]?.id ?? `camera:hand-${this.nextHandId++}`;
         currentHands.add(id);
+
         const pinchDistance = Math.hypot(
           indexTip.x - thumbTip.x,
           indexTip.y - thumbTip.y
         );
         const previous = this.handStates.get(id);
+
         const stabilizedGesture = this.stabilizeGesture(
           this.classifyGesture(landmarks),
           previous,
           now
         );
+
         const elapsed = previous
-          ? Math.max((now - previous.lastSeenAt) / 1000, 0)
-          : 0;
-        const smoothingAlpha = 1 - Math.exp(-elapsed / SMOOTHING_TIME_CONSTANT);
+          ? Math.max((now - previous.lastSeenAt) / 1000, 0.001)
+          : 0.016;
+
+        // -------------------------------------------------------------
+        // VELOCITY-ADAPTIVE SMOOTHING LOGIC
+        // -------------------------------------------------------------
+        let dynamicTimeConstant = SMOOTHING_TC_SLOW;
+
+        if (previous) {
+          // Calculate Euclidean movement velocity (distance in screen units per second)
+          const distMoved = Math.hypot(targetX - previous.normX, targetY - previous.normY);
+          const velocity = distMoved / elapsed; 
+
+          // Interpolate time constant based on speed (higher velocity -> smaller TC -> faster response)
+          const speedRatio = Math.min(velocity / VELOCITY_THRESHOLD, 1.0);
+          dynamicTimeConstant = SMOOTHING_TC_SLOW - speedRatio * (SMOOTHING_TC_SLOW - SMOOTHING_TC_FAST);
+        }
+
+        const smoothingAlpha = 1 - Math.exp(-elapsed / dynamicTimeConstant);
+        // -------------------------------------------------------------
+
         const isPinching = previous?.isPinching
           ? pinchDistance < RELEASE_THRESHOLD
           : pinchDistance < PINCH_THRESHOLD;
+
         const pinchStarted = isPinching &&
           !previous?.isPinching &&
           !suppressPinchStarts;
+
         if (pinchStarted) this.pinchStartedIds.add(id);
 
         const clickNormX = 1 - (indexTip.x + thumbTip.x) / 2;
         const clickNormY = (indexTip.y + thumbTip.y) / 2;
+
         const normX = this.smoothCoordinate(previous?.normX ?? null, targetX, smoothingAlpha);
         const normY = this.smoothCoordinate(previous?.normY ?? null, targetY, smoothingAlpha);
+
         this.handStates.set(id, {
           ...stabilizedGesture,
           normX,
@@ -247,6 +268,7 @@ export class CameraInput {
           isClicked: pinchStarted
         };
       });
+
       if (suppressPinchStarts && detectedVisitors.some((visitor) => !visitor.isPinching)) {
         this.suppressPinchStarts = false;
       }
@@ -272,6 +294,7 @@ export class CameraInput {
 
       this.cameraVisitors = [...detectedVisitors, ...retainedVisitors]
         .sort((a, b) => a.id.localeCompare(b.id));
+
       const primaryHand = this.cameraVisitors[0];
       this.rawNormalizedState = primaryHand
         ? {
@@ -286,8 +309,10 @@ export class CameraInput {
             active: false,
             isPinching: false
           };
+
       this.pinchStarted = this.pinchStartedIds.size > 0;
       this.wasPinching = this.cameraVisitors.some((hand) => hand.isPinching);
+
     } catch (err) {
       console.error("[CameraInput] Hand tracking failed:", err);
       this.cameraVisitors = [];
