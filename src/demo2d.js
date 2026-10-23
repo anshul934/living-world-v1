@@ -1,7 +1,126 @@
 import "./demo2d.css"
 import { VisitorInput } from "./interaction/VisitorInput.js"
 import { CameraInput } from "./CameraInput.js"
-import { predictDisturbance } from "./ai/PredictionEngine.js"
+import { predictDisturbance } from "./ai/PredictionEngineV3.js"
+import { predictDisturbance as predictDisturbanceV2 } from "./ai/PredictionEngineV2.js"
+import { estimateTrendClosingSpeed } from "./ai/PredictionTrend.js"
+import {
+  probabilityWithinRadius,
+  scaleHeatmapRiskBySpeed,
+  speedRiskMultiplier,
+  VisitorHeatmapPredictor
+} from "./ai/VisitorHeatmap.js"
+import { PredictionEvaluator } from "./ai/PredictionEvaluator.js"
+
+const predictionEvaluator = new PredictionEvaluator ()      // V3 (primary)
+const predictionEvaluatorV2 = new PredictionEvaluator ()    // V2 (baseline, same events)
+const predictionTrendEvaluator = new PredictionEvaluator ()  // V3 trend-only candidate (shadow)
+const predictionHeatmapEvaluator = new PredictionEvaluator () // Visitor heatmap candidate (shadow)
+let visitorHeatmapVisible = false
+const predictionEvaluators = [
+  predictionEvaluator,
+  predictionEvaluatorV2,
+  predictionTrendEvaluator,
+  predictionHeatmapEvaluator
+]
+window.comparePredictors = () => {
+  const keys = ["TP", "FP", "FN", "TN", "samples", "precision", "recall", "falsePositiveRate",
+    "fleeEpisodes", "evaluableFleeEpisodes", "evaluableFleeEpisodesWarned", "evaluableEpisodeRecall",
+    "evaluableMedianLeadMs", "newDisturbanceCandidateEpisodes", "newDisturbanceCandidateEpisodeRecall",
+    "newDisturbanceCandidateMedianLeadMs", "falsePositiveRecordsWithHighFearAndZeroThreat"]
+  const a = predictionEvaluator.summary()
+  const b = predictionEvaluatorV2.summary()
+  const c = predictionTrendEvaluator.summary()
+  const d = predictionHeatmapEvaluator.summary()
+  console.table(Object.fromEntries(keys.map((k) => [
+    k,
+    { V3: a[k], V3Trend: c[k], V3Heatmap: d[k], V2: b[k] }
+  ])))
+}
+window.predictionReport = () => {
+  console.table({
+    V3: predictionEvaluator.summary(),
+    V3Trend: predictionTrendEvaluator.summary(),
+    V3Heatmap: predictionHeatmapEvaluator.summary(),
+    V2: predictionEvaluatorV2.summary()
+  })
+  console.table([
+    ...predictionEvaluator.fleeEpisodes.map((e) => ({ predictor: "V3", ...e })),
+    ...predictionTrendEvaluator.fleeEpisodes.map((e) => ({ predictor: "V3Trend", ...e })),
+    ...predictionHeatmapEvaluator.fleeEpisodes.map((e) => ({ predictor: "V3Heatmap", ...e }))
+  ].map((e) => ({
+    predictor: e.predictor,
+    creature: e.creatureId, startMs: e.startMs, durationMs: e.durationMs,
+    predictionTriggered: e.predictionTriggered,
+    predictionSource: e.predictionSource,
+    warned: e.warned, leadMs: e.leadMs, measuredLeadMs: e.measuredLeadMs,
+    expectedCalmToMovement: e.expectedCalmToMovement,
+    eventGroup: e.eventGroup,
+    continuingEncounterReflee: e.continuingEncounterReflee,
+    sameVisitorAsPreviousFlee: e.sameVisitorAsPreviousFlee,
+    intervalSincePreviousFleeEndMs: e.intervalSincePreviousFleeEndMs,
+    inputContinuityConcern: e.inputContinuityConcern,
+    maxVisitorSpeedBeforeFlee: e.maxVisitorSpeedBeforeFlee,
+    highVisitorSpeedSamplesNearFlee: e.highVisitorSpeedSamplesNearFlee,
+    visitorAbsenceSamplesNearFlee: e.visitorAbsenceSamplesNearFlee,
+    differentVisitorIdSamplesNearFlee: e.differentVisitorIdSamplesNearFlee,
+    expectedVisitorId: e.expectedVisitorId,
+    expectedCalmStillnessMs: e.expectedCalmStillnessMs,
+    noActiveVisitorAtEntry: e.noActiveVisitorAtEntry,
+    rapidBoundaryReflee: e.rapidBoundaryReflee,
+    intervalSincePreviousFleeMs: e.intervalSincePreviousFleeMs,
+    maxCalmDurationMsBeforeFlee: e.maxCalmDurationMsBeforeFlee,
+    visitorStillnessThresholdReachedInTrace: e.visitorStillnessThresholdReachedInTrace,
+    curiosityObservedInTrace: e.curiosityObservedInTrace,
+    curiosityTargetMatchedInTrace: e.curiosityTargetMatchedInTrace,
+    stateAtEntry: e.entry?.state,
+    visitorId: e.entry?.visitorId,
+    visitorSpeed: e.entry?.visitorSpeed,
+    heatmapVisitorSpeed: e.entry?.heatmapVisitorSpeed,
+    heatmapSpeedMultiplier: e.entry?.heatmapSpeedMultiplier,
+    heatmapRiskScore: e.entry?.heatmapRiskScore,
+    calmDurationMs: e.entry?.calmDurationMs,
+    dist: e.entry?.distance, approach: e.entry?.approachSpeed, threat: e.entry?.threat
+  })))
+  return predictionEvaluator.records
+}
+window.downloadPredictions = () => {
+  const blob = new Blob(
+    [JSON.stringify({
+      summary: predictionEvaluator.summary(),
+      records: predictionEvaluator.records,
+      fleeEpisodes: predictionEvaluator.fleeEpisodes,
+      summaryV2: predictionEvaluatorV2.summary(),
+      recordsV2: predictionEvaluatorV2.records,
+      fleeEpisodesV2: predictionEvaluatorV2.fleeEpisodes,
+      summaryV3Trend: predictionTrendEvaluator.summary(),
+      recordsV3Trend: predictionTrendEvaluator.records,
+      fleeEpisodesV3Trend: predictionTrendEvaluator.fleeEpisodes,
+      summaryV3Heatmap: predictionHeatmapEvaluator.summary(),
+      recordsV3Heatmap: predictionHeatmapEvaluator.records,
+      fleeEpisodesV3Heatmap: predictionHeatmapEvaluator.fleeEpisodes,
+      visitorHeatmaps: [...visitorHeatmapForecasts.values()],
+      visitorHeatmapAccuracy: [...visitorHeatmapPredictors.entries()].map(
+        ([visitorId, predictor]) => ({ visitorId, ...predictor.summary() })
+      )
+    }, null, 2)],
+    { type: "application/json" }
+  )
+  const a = document.createElement("a")
+  a.href = URL.createObjectURL(blob)
+  a.download = "prediction-records.json"
+  a.click()
+}
+window.visitorHeatmapReport = () => ({
+  forecasts: [...visitorHeatmapForecasts.values()],
+  accuracyByVisitor: [...visitorHeatmapPredictors.entries()].map(
+    ([visitorId, predictor]) => ({ visitorId, ...predictor.summary() })
+  )
+})
+window.toggleVisitorHeatmap = () => {
+  visitorHeatmapVisible = !visitorHeatmapVisible
+  return visitorHeatmapVisible
+}
 
 const canvas = document.querySelector("#forest-canvas")
 const ctx = canvas.getContext("2d")
@@ -30,6 +149,10 @@ const CURIOSITY_STILLNESS_MS = 2500
 const GENTLE_APPROACH_SPEED = 185
 const RAPID_APPROACH_SPEED = 310
 const THREAT_RADIUS = 260
+const PREDICTION_FLEE_DISTANCE = THREAT_RADIUS * (1 - .3)
+const PREDICTIVE_FLEE_RECOVERY_MS = 1000
+const PREDICTIVE_FLEE_REARM_MS = 850
+const PREDICTION_CUE = true
 
 let viewScale = 1
 let offsetX = 0
@@ -80,6 +203,7 @@ export const ThreatProvider = {
 }
 
 const butterfly = {
+  id : "butterfly-1",
   x: 490, y: 325,
   vx: 0, vy: 0,
   state: "REST",
@@ -97,6 +221,11 @@ const butterfly = {
   targetY: 360,
   escapeX: 650,
   escapeY: 260,
+  predictionFleeActive: false,
+  predictionFleeClearSince: null,
+  predictionFleeVisitorId: null,
+  predictionFleeSource: null,
+  predictionFleeRearmSince: null,
   lastState: "REST",
   flutterPhase: 0,
   bodyAngle: 0,
@@ -111,6 +240,7 @@ const butterfly = {
 }
 const secondButterfly = {
   ...butterfly,
+  id : "butterfly-2",
   x: 735,
   y: 415,
   vx: 0,
@@ -144,11 +274,11 @@ const trees = [
   { x: 840, y: 285, r: 60, shade: 0, sway: 5.8, rustle: 0 }
 ]
 const birds = [
-  { id: 1, treeIndex: 2, revealed: false, flight: null, readiness: false, headingAngle: 0, curiousVisitorId: null, havenVisitorId: null, nextVisitorSwitchAt: 0, orbitAngle: 0, phase: 0.3 },
-  { id: 2, treeIndex: 4, revealed: false, flight: null, readiness: false, headingAngle: 0, curiousVisitorId: null, havenVisitorId: null, nextVisitorSwitchAt: 0, orbitAngle: 2.1, phase: 2.1 },
-  { id: 3, treeIndex: 0, revealed: false, flight: null, readiness: false, headingAngle: 0, curiousVisitorId: null, havenVisitorId: null, nextVisitorSwitchAt: 0, orbitAngle: 1.2, phase: 1.2 },
-  { id: 4, treeIndex: 1, revealed: false, flight: null, readiness: false, headingAngle: 0, curiousVisitorId: null, havenVisitorId: null, nextVisitorSwitchAt: 0, orbitAngle: 3.7, phase: 3.7 },
-  { id: 5, treeIndex: 3, revealed: false, flight: null, readiness: false, headingAngle: 0, curiousVisitorId: null, havenVisitorId: null, nextVisitorSwitchAt: 0, orbitAngle: 5.1, phase: 5.1 }
+  { id: 1, treeIndex: 2, revealed: false, flight: null, readiness: false, predictionReadiness: false, headingAngle: 0, curiousVisitorId: null, havenVisitorId: null, predictionFleeVisitorId: null, predictionFleeRearmSince: null, nextVisitorSwitchAt: 0, orbitAngle: 0, phase: 0.3 },
+  { id: 2, treeIndex: 4, revealed: false, flight: null, readiness: false, predictionReadiness: false, headingAngle: 0, curiousVisitorId: null, havenVisitorId: null, predictionFleeVisitorId: null, predictionFleeRearmSince: null, nextVisitorSwitchAt: 0, orbitAngle: 2.1, phase: 2.1 },
+  { id: 3, treeIndex: 0, revealed: false, flight: null, readiness: false, predictionReadiness: false, headingAngle: 0, curiousVisitorId: null, havenVisitorId: null, predictionFleeVisitorId: null, predictionFleeRearmSince: null, nextVisitorSwitchAt: 0, orbitAngle: 1.2, phase: 1.2 },
+  { id: 4, treeIndex: 1, revealed: false, flight: null, readiness: false, predictionReadiness: false, headingAngle: 0, curiousVisitorId: null, havenVisitorId: null, predictionFleeVisitorId: null, predictionFleeRearmSince: null, nextVisitorSwitchAt: 0, orbitAngle: 3.7, phase: 3.7 },
+  { id: 5, treeIndex: 3, revealed: false, flight: null, readiness: false, predictionReadiness: false, headingAngle: 0, curiousVisitorId: null, havenVisitorId: null, predictionFleeVisitorId: null, predictionFleeRearmSince: null, nextVisitorSwitchAt: 0, orbitAngle: 5.1, phase: 5.1 }
 ]
 // Last actual displayed position of each bird.
 // Needed when a visitor disappears during investigation.
@@ -374,7 +504,9 @@ function updateVisitorApproachSpeeds(dt) {
         Math.max(distance(item.x, item.y, creature.x, creature.y), 1))
       )
       : 0
-    item.approachSpeed = previous
+      item.velX = visitorVelocityX
+      item.velY = visitorVelocityY
+      item.approachSpeed = previous
       ? previous.approachSpeed * .6 + rawSpeed * .4
       : 0
     previousVisitorDistances.set(item.id, {
@@ -400,7 +532,7 @@ function closestVisitor(x, y, candidates = visitors) {
   }
   return closest
 }
-function chooseEscapeTarget(creature) {
+function chooseEscapeTarget(creature, allowDistantEscape = false) {
   const threatVector = ThreatProvider.getThreatVectorAt(creature.x, creature.y, true)
   const currentThreat = ThreatProvider.getThreatAt(creature.x, creature.y, true)
   let safestDirection = { x: threatVector.x, y: threatVector.y }
@@ -422,7 +554,7 @@ function chooseEscapeTarget(creature) {
     }
   }
 
-  if (!Number.isFinite(lowestThreat) || currentThreat === 0) return
+  if (!Number.isFinite(lowestThreat) || (currentThreat === 0 && !allowDistantEscape)) return
   creature.escapeX = clamp(creature.x + safestDirection.x * 155, 38, WORLD_W - 38)
   creature.escapeY = clamp(creature.y + safestDirection.y * 155, 65, WORLD_H - 70)
 }
@@ -470,11 +602,32 @@ function startCuriosity(creature, target = visitorById(creature.curiosityVisitor
   creature.vy *= .4
 }
 
-function changeState(creature, next) {
+function changeState(
+  creature,
+  next,
+  { predictionTriggered = false, predictionSource = null } = {}
+) {
   if (creature.state === next) return
   const previous = creature.state
   creature.state = next
-  console.log(`[Butterfly] State: ${previous} → ${next}`)
+  const reason = predictionTriggered
+    ? ` (${predictionSource ?? "predictor"} prediction)`
+    : ""
+  console.log(`[Butterfly] State: ${previous} → ${next}${reason}`)
+  if (next === "FLEE") {
+    for (const ev of predictionEvaluators) {
+      ev.noteFlee(creature.id, performance.now(), {
+        predictionTriggered,
+        predictionSource
+      })
+    }
+  }
+  if (previous === "FLEE") {
+    for (const ev of predictionEvaluators) ev.noteFleeEnd(creature.id, performance.now())
+    creature.predictionFleeActive = false
+    creature.predictionFleeClearSince = null
+    creature.predictionFleeSource = null
+  }
   if (next === "REST") {
     creature.restElapsed = 0
     creature.vx *= .35
@@ -485,7 +638,7 @@ function changeState(creature, next) {
     creature.targetX = flowers[creature.targetFlower].x
     creature.targetY = flowers[creature.targetFlower].y - 18
   }
-  if (next === "FLEE") chooseEscapeTarget(creature)
+  if (next === "FLEE") chooseEscapeTarget(creature, predictionTriggered)
   if (next === "CURIOUS") startCuriosity(creature)
   if (next !== "CURIOUS") creature.curiosityVisitorId = null
   if (next === "RETURN") {
@@ -551,48 +704,312 @@ function updateButterflyHaven(creature, target, dt, index) {
 }
 
 const predictionLogTimes = new Map()
+const predictionDistanceHistory = new Map()
+const visitorHeatmapPredictors = new Map()
+const visitorHeatmapForecasts = new Map()
+let activeHeatmapVisitorIds = new Set()
+// Tracks when each visitor first becomes calm.
+const visitorCalmSince = new Map()
+
+function getVisitorCalmDurationMs(visitor, now) {
+  if (!visitor || !visitor.active) return 0
+  if (!(visitor.lastMovedAt > 0)) return 0
+  // Same definition of calm the butterflies actually use (stillness).
+  return Math.max(0, now - visitor.lastMovedAt)
+}
+
+function updateVisitorHeatmapForecasts(now) {
+  const activeVisitorIds = new Set()
+  for (const item of visitors) {
+    if (!item.active) continue
+    activeVisitorIds.add(item.id)
+    let predictor = visitorHeatmapPredictors.get(item.id)
+    if (!predictor) {
+      predictor = new VisitorHeatmapPredictor({
+        worldWidth: WORLD_W,
+        worldHeight: WORLD_H
+      })
+      visitorHeatmapPredictors.set(item.id, predictor)
+    }
+    const forecast = predictor.update({
+      visitorId: item.id,
+      x: item.x,
+      y: item.y
+    }, now)
+    if (forecast) visitorHeatmapForecasts.set(item.id, forecast)
+  }
+
+  for (const visitorId of activeHeatmapVisitorIds) {
+    if (!activeVisitorIds.has(visitorId)) {
+      visitorHeatmapPredictors.get(visitorId)?.end()
+      visitorHeatmapForecasts.delete(visitorId)
+    }
+  }
+  activeHeatmapVisitorIds = activeVisitorIds
+}
+
+function predictHeatmapDisturbance(x, y, now) {
+  let noDisturbanceProbability = 1
+  let strongestVisitor = null
+
+  for (const item of visitors) {
+    const visitorRisk = getHeatmapVisitorRisk(item, x, y, now)
+    if (visitorRisk === 0) continue
+    const forecast = visitorHeatmapForecasts.get(item.id)
+    noDisturbanceProbability *= 1 - visitorRisk
+    if (!strongestVisitor || visitorRisk > strongestVisitor.riskScore) {
+      strongestVisitor = {
+        visitorId: item.id,
+        predictedX: forecast.predictedX,
+        predictedY: forecast.predictedY,
+        speed: forecast.speed,
+        speedMultiplier: speedRiskMultiplier(forecast.speed),
+        riskScore: visitorRisk
+      }
+    }
+  }
+
+  const riskScore = Number((1 - noDisturbanceProbability).toFixed(3))
+  return {
+    riskScore,
+    predictedDisturbance: riskScore >= .5,
+    horizonMs: 1500,
+    visitorId: strongestVisitor?.visitorId ?? null,
+    predictedVisitorX: strongestVisitor?.predictedX ?? null,
+    predictedVisitorY: strongestVisitor?.predictedY ?? null,
+    visitorSpeed: strongestVisitor?.speed ?? 0,
+    speedMultiplier: strongestVisitor?.speedMultiplier ?? 0
+  }
+}
+
+function getHeatmapVisitorRisk(item, x, y, now) {
+  if (!item?.active || calmOptionsFor(item, now)) return 0
+  const forecast = visitorHeatmapForecasts.get(item.id)
+  if (!forecast) return 0
+  const proximityProbability = probabilityWithinRadius(
+    forecast,
+    x,
+    y,
+    PREDICTION_FLEE_DISTANCE
+  )
+  return scaleHeatmapRiskBySpeed(proximityProbability, forecast.speed)
+}
+
+function getTrendClosingSpeed(creatureKey, visitorId, distance, now) {
+  if (visitorId === null || !Number.isFinite(distance)) {
+    predictionDistanceHistory.delete(creatureKey)
+    return 0
+  }
+
+  const history = (predictionDistanceHistory.get(creatureKey) ?? [])
+    .filter((sample) => sample.visitorId === visitorId && now - sample.t <= 900)
+  const trendClosingSpeed = estimateTrendClosingSpeed(history, {
+    now,
+    distance,
+    visitorId
+  })
+  history.push({ t: now, distance, visitorId })
+  predictionDistanceHistory.set(creatureKey, history)
+  return trendClosingSpeed
+}
+
 function logDisturbancePrediction(creature, nearest, d, approach, now) {
+  approach = nearest && Number.isFinite(nearest.velX)
+    ? Math.max(0, (nearest.velX * (creature.x - nearest.x) +
+        nearest.velY * (creature.y - nearest.y)) / Math.max(d, 1))
+    : 0
+  // Measure continuous calm duration using the existing tracker.
+  const calmDurationMs = getVisitorCalmDurationMs(nearest, now)
+
+  const threat = ThreatProvider.getThreatAt(creature.x, creature.y, true)
+  const visitorSpeed = nearest && Number.isFinite(nearest.velX) && Number.isFinite(nearest.velY)
+    ? Math.hypot(nearest.velX, nearest.velY)
+    : 0
+  const creatureIndex = butterflies.indexOf(creature)
+  const creatureKey =
+    creature.id ??
+    (creatureIndex >= 0
+      ? `butterfly-${creatureIndex + 1}`
+      : "unknown-creature")
+  const trendClosingSpeed = getTrendClosingSpeed(
+    creatureKey,
+    nearest?.id ?? null,
+    d,
+    now
+  )
+  const predictionHeatmap = predictHeatmapDisturbance(creature.x, creature.y, now)
   const prediction = predictDisturbance({
     distance: d,
     approachSpeed: approach,
+    visitorSpeed,
     fear: creature.fear,
-    // Calm duration tracking will be added after this baseline is validated.
-    calmDurationMs: 0
+    calmDurationMs,
+    threat
   })
-  const creatureIndex = butterflies.indexOf(creature)
+  const predictionTrend = predictDisturbance({
+    distance: d,
+    approachSpeed: approach,
+    visitorSpeed,
+    trendClosingSpeed,
+    fear: creature.fear,
+    calmDurationMs,
+    threat
+  })
+  const predictionV2 = predictDisturbanceV2({
+    distance: d,
+    approachSpeed: approach,
+    fear: creature.fear,
+    calmDurationMs,
+    threat
+  })
+  creature.predictedDisturbance =
+    predictionTrend.predictedDisturbance ||
+    (predictionHeatmap.predictedDisturbance &&
+      predictionHeatmap.visitorId === nearest?.id)
 
-const creatureKey =
-  creature.id ??
-  (creatureIndex >= 0
-    ? `butterfly-${creatureIndex + 1}`
-    : "unknown-creature")
+  predictionEvaluator.observe(
+    creatureKey,
+    prediction,
+    {
+      state: creature.state,
+      visitorId: nearest?.id ?? null,
+      curiosityVisitorId: creature.curiosityVisitorId ?? null,
+      distance: d,
+      approachSpeed: approach,
+      trendClosingSpeed,
+      visitorSpeed,
+      fear: creature.fear,
+      threat,
+      calmDurationMs
+    },
+    now
+  )
+
+  predictionTrendEvaluator.observe(
+    creatureKey,
+    predictionTrend,
+    {
+      state: creature.state,
+      visitorId: nearest?.id ?? null,
+      curiosityVisitorId: creature.curiosityVisitorId ?? null,
+      distance: d,
+      approachSpeed: approach,
+      trendClosingSpeed,
+      visitorSpeed,
+      fear: creature.fear,
+      threat,
+      calmDurationMs
+    },
+    now
+  )
+
+  predictionHeatmapEvaluator.observe(
+    creatureKey,
+    predictionHeatmap,
+    {
+      state: creature.state,
+      visitorId: nearest?.id ?? null,
+      curiosityVisitorId: creature.curiosityVisitorId ?? null,
+      distance: d,
+      approachSpeed: approach,
+      trendClosingSpeed,
+      visitorSpeed,
+      fear: creature.fear,
+      threat,
+      calmDurationMs,
+      heatmapRiskScore: predictionHeatmap.riskScore,
+      heatmapVisitorSpeed: predictionHeatmap.visitorSpeed,
+      heatmapSpeedMultiplier: predictionHeatmap.speedMultiplier,
+      heatmapVisitorId: predictionHeatmap.visitorId,
+      predictedVisitorX: predictionHeatmap.predictedVisitorX,
+      predictedVisitorY: predictionHeatmap.predictedVisitorY
+    },
+    now
+  )
+
+  const evaluationInputs = {
+    state: creature.state,
+    visitorId: nearest?.id ?? null,
+    curiosityVisitorId: creature.curiosityVisitorId ?? null,
+    distance: d,
+    approachSpeed: approach,
+    trendClosingSpeed,
+    visitorSpeed,
+    fear: creature.fear,
+    calmDurationMs,
+    threat,
+    heatmapRiskScore: predictionHeatmap.riskScore,
+    heatmapVisitorSpeed: predictionHeatmap.visitorSpeed,
+    heatmapSpeedMultiplier: predictionHeatmap.speedMultiplier,
+    heatmapVisitorId: predictionHeatmap.visitorId,
+    predictedVisitorX: predictionHeatmap.predictedVisitorX,
+    predictedVisitorY: predictionHeatmap.predictedVisitorY
+  }
+
+  predictionEvaluatorV2.observe(creatureKey, predictionV2, evaluationInputs, now)
+
   const lastLogAt = predictionLogTimes.get(creatureKey) ?? -Infinity
+
   // Log at most once per second per creature.
   if (now - lastLogAt >= 1000) {
     predictionLogTimes.set(creatureKey, now)
-    console.log("[PredictionDiag] DISTURBANCE", {
+    const heatmapWarningMatchesVisitor =
+      predictionHeatmap.predictedDisturbance &&
+      predictionHeatmap.visitorId === nearest?.id
+    const behaviorWarning =
+      predictionTrend.predictedDisturbance || heatmapWarningMatchesVisitor
+    const diagnosticLabel = behaviorWarning
+      ? "DISTURBANCE_PREDICTED"
+      : "NO_DISTURBANCE_PREDICTED"
+    console.log(`[PredictionDiag] ${diagnosticLabel}`, {
       time: Math.round(now),
       creatureId: creatureKey,
       state: creature.state,
+
+      // Inputs used by the predictor.
       visitorId: nearest?.id ?? null,
+      visitorActive: Boolean(nearest?.active),
       distance: Number.isFinite(d) ? Math.round(d) : null,
       approachSpeed: Math.round(approach),
+      trendClosingSpeed: Math.round(trendClosingSpeed),
+      visitorSpeed: Math.round(visitorSpeed),
       fear: Number(creature.fear.toFixed(3)),
+      calmDurationMs: Math.round(calmDurationMs),
+
+      // Prediction outputs.
       riskScore: prediction.riskScore,
       predictedDisturbance: prediction.predictedDisturbance,
+      behaviorWarning,
+      trendRiskScore: predictionTrend.riskScore,
+      trendPredictedDisturbance: predictionTrend.predictedDisturbance,
+      heatmapRiskScore: predictionHeatmap.riskScore,
+      heatmapPredictedDisturbance: predictionHeatmap.predictedDisturbance,
+      heatmapWarningMatchesVisitor,
+      heatmapVisitorSpeed: Math.round(predictionHeatmap.visitorSpeed),
+      heatmapSpeedMultiplier: predictionHeatmap.speedMultiplier,
+      predictedVisitorX: predictionHeatmap.predictedVisitorX,
+      predictedVisitorY: predictionHeatmap.predictedVisitorY,
       horizonMs: prediction.horizonMs
     })
   }
-  return prediction
+
+  // Snapshot recording is deferred until after the state decision below. If this
+  // frame causes FLEE, record() sees state === "FLEE" and skips it instead of
+  // labelling an already-occurring flee as a prospective prediction success.
+  return {
+    creatureKey,
+    prediction,
+    predictionV2,
+    predictionTrend,
+    predictionHeatmap,
+    inputs: evaluationInputs
+  }
 }
+
 
 function updateButterfly(creature, dt, now) {
   const threatLevel = ThreatProvider.getThreatAt(creature.x, creature.y, true)
   const threatVector = ThreatProvider.getThreatVectorAt(creature.x, creature.y, true)
-  if (threatLevel >= .3) {
-    creature.havenVisitorId = null
-    changeState(creature, "FLEE")
-  }
 
   const butterflyHavens = visitors.filter((item) =>
     item.active && item.havenType === "butterfly"
@@ -601,7 +1018,7 @@ function updateButterfly(creature, dt, now) {
   const havenTarget = currentHaven?.havenType === "butterfly"
     ? currentHaven
     : chooseVisitor(butterflyHavens, creature.havenVisitorId)
-  if (havenTarget && threatLevel < .3) {
+  if (havenTarget) {
     creature.curiosityVisitorId = null
     updateButterflyHaven(creature, havenTarget, dt, butterflies.indexOf(creature))
     return
@@ -610,8 +1027,6 @@ function updateButterfly(creature, dt, now) {
     creature.havenVisitorId = null
     if (creature.state === "HAVEN") changeState(creature, "RETURN")
   }
-
-  updateButterflyOrientation(creature, threatLevel, threatVector, dt)
 
   const closest = closestVisitor(creature.x, creature.y)
   const threatVisitor = closestVisitor(
@@ -630,7 +1045,76 @@ function updateButterfly(creature, dt, now) {
   const d = nearest ? distance(nearest.x, nearest.y, creature.x, creature.y) : Infinity
   const approach = nearest?.approachSpeed ?? 0
   const calmOptions = calmVisitors(now)
-  logDisturbancePrediction(creature, nearest, d, approach, now)
+  const predictionContext = logDisturbancePrediction(creature, nearest, d, approach, now)
+  const predictionVisitorId = predictionContext.inputs.visitorId
+  if (creature.predictionFleeVisitorId !== null) {
+    if (
+      predictionVisitorId !== creature.predictionFleeVisitorId ||
+      predictionContext.inputs.calmDurationMs >= CURIOSITY_STILLNESS_MS
+    ) {
+      creature.predictionFleeVisitorId = null
+      creature.predictionFleeRearmSince = null
+    } else if (
+      d >= SAFE_DISTANCE &&
+      predictionContext.predictionHeatmap.riskScore < .25 &&
+      predictionContext.inputs.trendClosingSpeed <= 0
+    ) {
+      if (creature.predictionFleeRearmSince === null) {
+        creature.predictionFleeRearmSince = now
+      } else if (
+        now - creature.predictionFleeRearmSince >= PREDICTIVE_FLEE_REARM_MS
+      ) {
+        creature.predictionFleeVisitorId = null
+        creature.predictionFleeRearmSince = null
+      }
+    } else {
+      creature.predictionFleeRearmSince = null
+    }
+  }
+  const trendWarning = predictionContext.predictionTrend.predictedDisturbance
+  const heatmapWarning =
+    predictionContext.predictionHeatmap.predictedDisturbance &&
+    predictionContext.predictionHeatmap.visitorId === predictionVisitorId
+  const predictionSource = trendWarning && heatmapWarning
+    ? "V3Trend + V3Heatmap"
+    : trendWarning
+      ? "V3Trend"
+      : heatmapWarning
+        ? "V3Heatmap"
+        : null
+  const predictionTriggeredFlee =
+    threatLevel < .3 &&
+    predictionSource !== null &&
+    predictionVisitorId !== creature.predictionFleeVisitorId
+  const predictionFleeTriggeredNow =
+    predictionTriggeredFlee && creature.state !== "FLEE"
+  if (predictionFleeTriggeredNow) {
+    creature.predictionFleeActive = true
+    creature.predictionFleeClearSince = null
+    creature.predictionFleeVisitorId = predictionVisitorId
+    creature.predictionFleeSource = predictionSource
+    creature.predictionFleeRearmSince = null
+  } else if (creature.predictionFleeActive) {
+    if (d >= SAFE_DISTANCE && threatLevel < .3 && !predictionTriggeredFlee) {
+      if (creature.predictionFleeClearSince === null) {
+        creature.predictionFleeClearSince = now
+      } else if (now - creature.predictionFleeClearSince >= PREDICTIVE_FLEE_RECOVERY_MS) {
+        creature.predictionFleeActive = false
+        creature.predictionFleeClearSince = null
+      }
+    } else {
+      creature.predictionFleeClearSince = null
+    }
+  }
+  // Preserve the original state/heading response order while ensuring the
+  // current visitor observation exists before changeState("FLEE") records it.
+  if (threatLevel >= .3) changeState(creature, "FLEE")
+  updateButterflyOrientation(
+    creature,
+    predictionTriggeredFlee ? .3 : threatLevel,
+    threatVector,
+    dt
+  )
   let curiosityTarget = visitorById(creature.curiosityVisitorId)
   if (
     calmOptions.length &&
@@ -659,10 +1143,21 @@ function updateButterfly(creature, dt, now) {
     distance(item.x, item.y, creature.x, creature.y) <= TOUCH_DISTANCE
   )
 
-  if (visitorTooClose || effectiveThreatLevel >= .3 || curiosityTargetIsDisturbed) {
-    changeState(creature, "FLEE")
-  } else if (creature.state === "FLEE" && d < SAFE_DISTANCE &&
-             !(nearestIsCalm && creature.fear < .55)) {
+  if (
+    visitorTooClose ||
+    effectiveThreatLevel >= .3 ||
+    curiosityTargetIsDisturbed ||
+    predictionTriggeredFlee
+  ) {
+    changeState(creature, "FLEE", {
+      predictionTriggered: predictionFleeTriggeredNow,
+      predictionSource: predictionFleeTriggeredNow ? predictionSource : null
+    })
+  } else if (
+    creature.state === "FLEE" &&
+    (creature.predictionFleeActive ||
+      (d < SAFE_DISTANCE && !(nearestIsCalm && creature.fear < .55)))
+  ) {
     // Keep escaping while the visitor is actively threatening. If the visitor
     // settles and fear has eased, allow the butterfly to recover nearby.
   } else if (nearest && approach > RAPID_APPROACH_SPEED && d < ALERT_DISTANCE) {
@@ -685,6 +1180,40 @@ function updateButterfly(creature, dt, now) {
   } else if (creature.state === "ALERT" && (!nearest || d >= SAFE_DISTANCE)) {
     changeState(creature, "RETURN")
   }
+
+  // Record only after behaviour selection. noteFlee() has now seen this frame's
+  // observation, and samples from a frame that actually enters FLEE are skipped.
+  const snapshotState = predictionContext.inputs.state === "FLEE" || creature.state === "FLEE"
+    ? "FLEE"
+    : predictionContext.inputs.state
+  predictionEvaluator.record(
+    predictionContext.creatureKey,
+    snapshotState,
+    predictionContext.inputs,
+    predictionContext.prediction,
+    now
+  )
+  predictionEvaluatorV2.record(
+    predictionContext.creatureKey,
+    snapshotState,
+    predictionContext.inputs,
+    predictionContext.predictionV2,
+    now
+  )
+  predictionTrendEvaluator.record(
+    predictionContext.creatureKey,
+    snapshotState,
+    predictionContext.inputs,
+    predictionContext.predictionTrend,
+    now
+  )
+  predictionHeatmapEvaluator.record(
+    predictionContext.creatureKey,
+    snapshotState,
+    predictionContext.inputs,
+    predictionContext.predictionHeatmap,
+    now
+  )
 
   let tx = creature.x, ty = creature.y, speed = 0
   if (creature.state === "REST") {
@@ -773,7 +1302,8 @@ function updateButterfly(creature, dt, now) {
   creature.x = clamp(creature.x + creature.vx * dt, 26, WORLD_W - 26)
   creature.y = clamp(creature.y + creature.vy * dt, 55, WORLD_H - 55)
   updateButterflyHeading(creature, dt)
-  creature.flutterPhase += dt * (creature.state === "FLEE" ? 22 : 12)
+  const cue = PREDICTION_CUE && creature.predictedDisturbance && creature.state !== "FLEE"
+  creature.flutterPhase += dt * (creature.state === "FLEE" ? 22 : cue ? 17 : 12)
 }
 function updateButterflyHeading(creature, dt) {
   const movementSpeed = Math.hypot(creature.vx, creature.vy)
@@ -861,12 +1391,54 @@ function updateEnvironment(dt, now) {
   }
 
   for (const hiddenBird of birds) {
+    const perchPosition = birdTreePosition(hiddenBird)
+    const perchPrediction = predictHeatmapDisturbance(
+      perchPosition.x,
+      perchPosition.y,
+      now
+    )
+    const latchedVisitor = visitorById(hiddenBird.predictionFleeVisitorId)
+    if (hiddenBird.predictionFleeVisitorId !== null) {
+      const latchedRisk = getHeatmapVisitorRisk(
+        latchedVisitor,
+        perchPosition.x,
+        perchPosition.y,
+        now
+      )
+      if (!latchedVisitor || calmOptionsFor(latchedVisitor, now)) {
+        hiddenBird.predictionFleeVisitorId = null
+        hiddenBird.predictionFleeRearmSince = null
+      } else if (
+        distance(
+          latchedVisitor.x,
+          latchedVisitor.y,
+          perchPosition.x,
+          perchPosition.y
+        ) >= SAFE_DISTANCE &&
+        latchedRisk < .25
+      ) {
+        if (hiddenBird.predictionFleeRearmSince === null) {
+          hiddenBird.predictionFleeRearmSince = now
+        } else if (
+          now - hiddenBird.predictionFleeRearmSince >= PREDICTIVE_FLEE_REARM_MS
+        ) {
+          hiddenBird.predictionFleeVisitorId = null
+          hiddenBird.predictionFleeRearmSince = null
+        }
+      } else {
+        hiddenBird.predictionFleeRearmSince = null
+      }
+    }
     if (!hiddenBird.flight && !hiddenBird.curiousVisitorId) {
-      const perchPosition = birdTreePosition(hiddenBird)
       const perchThreat = ThreatProvider.getThreatAt(perchPosition.x, perchPosition.y)
-      hiddenBird.readiness = perchThreat >= .3 && perchThreat < .6
+      hiddenBird.predictionReadiness =
+        perchThreat < .3 && perchPrediction.riskScore >= .25
+      hiddenBird.readiness =
+        (perchThreat >= .3 && perchThreat < .6) ||
+        hiddenBird.predictionReadiness
     } else {
       hiddenBird.readiness = false
+      hiddenBird.predictionReadiness = false
     }
     updateBirdHeading(hiddenBird, now, dt)
 
@@ -909,6 +1481,37 @@ function updateEnvironment(dt, now) {
         continue
       }
       if (alreadyAtHaven) continue
+    }
+
+    if (
+      !hiddenBird.flight &&
+      !hiddenBird.curiousVisitorId &&
+      !hiddenBird.havenVisitorId &&
+      ThreatProvider.getThreatAt(perchPosition.x, perchPosition.y) < .3 &&
+      perchPrediction.predictedDisturbance &&
+      perchPrediction.visitorId !== hiddenBird.predictionFleeVisitorId
+    ) {
+      const destinationTreeIndex = choosePredictiveBirdEscapeTree(
+        hiddenBird,
+        perchPrediction.predictedVisitorX,
+        perchPrediction.predictedVisitorY
+      )
+      hiddenBird.predictionFleeVisitorId = perchPrediction.visitorId
+      hiddenBird.predictionFleeRearmSince = null
+      hiddenBird.readiness = false
+      hiddenBird.predictionReadiness = false
+      startBirdTreeFlight(hiddenBird, destinationTreeIndex, now, 1100)
+      hiddenBird.flight.predictionSource = "V3Heatmap"
+      console.log("[BirdPrediction] Forecast warning; moving to a safer tree", {
+        time: Math.round(now),
+        birdId: hiddenBird.id,
+        visitorId: perchPrediction.visitorId,
+        riskScore: perchPrediction.riskScore,
+        predictedVisitorX: Math.round(perchPrediction.predictedVisitorX),
+        predictedVisitorY: Math.round(perchPrediction.predictedVisitorY),
+        destinationTreeIndex
+      })
+      continue
     }
 
     if (hiddenBird.flight) {
@@ -1097,6 +1700,8 @@ function logBirdStateChanges(now) {
       ` | visitorTarget=${visitorTarget}` +
       ` | revealed=${bird.revealed}` +
       ` | readiness=${bird.readiness}` +
+      ` | predictionReadiness=${bird.predictionReadiness}` +
+      ` | predictionSource=${bird.flight?.predictionSource ?? "none"}` +
       ` | perchThreat=${threat.toFixed(2)}`
     )
   }
@@ -1107,6 +1712,24 @@ function logBirdStateChanges(now) {
 function birdTreePosition(bird) {
   const tree = trees[bird.treeIndex]
   return { x: tree.x + tree.r * .22, y: tree.y + tree.r * .22 }
+}
+function choosePredictiveBirdEscapeTree(bird, predictedX, predictedY) {
+  const availableTrees = trees
+    .map((tree, index) => ({ tree, index }))
+    .filter(({ index }) =>
+      index !== bird.treeIndex &&
+      !birds.some((other) => other !== bird &&
+        (other.treeIndex === index || other.flight?.toTreeIndex === index))
+    )
+  const candidates = availableTrees.length
+    ? availableTrees
+    : trees.map((tree, index) => ({ tree, index }))
+      .filter(({ index }) => index !== bird.treeIndex)
+  candidates.sort((a, b) =>
+    distance(b.tree.x, b.tree.y, predictedX, predictedY) -
+    distance(a.tree.x, a.tree.y, predictedX, predictedY)
+  )
+  return candidates[0]?.index ?? bird.treeIndex
 }
 function startBirdTreeFlight(bird, destinationTreeIndex, now, duration) {
   const currentTarget = visitorById(bird.curiousVisitorId)
@@ -1136,18 +1759,16 @@ function startBirdFlight(bird, target, now, currentPosition = null) {
   const from = currentPosition ?? (
     bird.flight
       ? birdFlightPosition(bird, now)
-      : currentTarget
-        ? birdVisitorPosition(bird, currentTarget, now)
-        : lastKnownPosition ?? birdTreePosition(bird)
+      : bird.curiousVisitorId
+        ? currentTarget
+          ? birdVisitorPosition(bird, currentTarget, now)
+          : lastKnownPosition ?? birdTreePosition(bird)
+        : birdTreePosition(bird)
   )
 
   let destination
   if (target) {
-    const orbitAngle = bird.orbitAngle + now * .0011 + .4
-    destination = {
-      x: target.x + Math.cos(orbitAngle) * 44,
-      y: target.y - 28 + Math.sin(orbitAngle) * 22
-    }
+    destination = birdVisitorPosition(bird, target, now)
     bird.havenVisitorId = target.havenType === "bird" ? target.id : null
   } else {
     destination = birdTreePosition(bird)
@@ -1364,7 +1985,8 @@ function drawTree(tree, index, now) {
       false,
       hiddenBird.phase,
       hiddenBird.readiness,
-      hiddenBird.headingAngle
+      hiddenBird.headingAngle,
+      hiddenBird.predictionReadiness
     );
   }
 }
@@ -1409,7 +2031,17 @@ function drawCuriousBirds(now) {
 
 
 
-function drawBirdAt(anchorX, anchorY, now, peek, flying = false, phase = 0, readiness = false, headingAngle = 0) {
+function drawBirdAt(
+  anchorX,
+  anchorY,
+  now,
+  peek,
+  flying = false,
+  phase = 0,
+  readiness = false,
+  headingAngle = 0,
+  predictionReadiness = false
+) {
   // The bird remains partly behind leaves until it feels safe enough to peek.
   const x = anchorX + 5
   const y = anchorY + 27 - peek * 21 + Math.sin(now * .006 + phase) * 1.8
@@ -1444,6 +2076,20 @@ function drawBirdAt(anchorX, anchorY, now, peek, flying = false, phase = 0, read
     ctx.save()
     ctx.strokeStyle = "rgba(240,224,151,.65)"
     ctx.beginPath(); ctx.arc(x, y, 22 + Math.sin(now * .005 + phase) * 2, 0, Math.PI * 2); ctx.stroke()
+    ctx.restore()
+  }
+  if (predictionReadiness) {
+    const pulse = .55 + Math.sin(now * .008 + phase) * .25
+    ctx.save()
+    ctx.strokeStyle = `rgba(255,190,94,${pulse})`
+    ctx.lineWidth = 2
+    ctx.beginPath()
+    ctx.arc(x, y - 5, 30 + Math.sin(now * .006 + phase) * 2, 0, Math.PI * 2)
+    ctx.stroke()
+    ctx.fillStyle = "#ffe0a3"
+    ctx.font = "700 8px DM Sans, sans-serif"
+    ctx.textAlign = "center"
+    ctx.fillText("FORECAST", x, y - 37)
     ctx.restore()
   }
 }
@@ -1490,6 +2136,20 @@ function drawButterfly(creature, now) {
   ctx.strokeStyle = "#4c383f"; ctx.lineWidth = 1
   ctx.beginPath(); ctx.moveTo(-1, -7); ctx.quadraticCurveTo(-9, -18, -7, -19); ctx.moveTo(1, -7); ctx.quadraticCurveTo(9, -18, 7, -19); ctx.stroke()
   ctx.restore()
+  if (creature.predictedDisturbance && creature.state !== "FLEE") {
+    const pulse = .55 + Math.sin(now * .008 + x * .02) * .25
+    ctx.save()
+    ctx.strokeStyle = `rgba(255,190,94,${pulse})`
+    ctx.lineWidth = 2
+    ctx.beginPath()
+    ctx.arc(x, y, 31 + Math.sin(now * .006 + x * .02) * 2, 0, Math.PI * 2)
+    ctx.stroke()
+    ctx.fillStyle = "#ffe0a3"
+    ctx.font = "700 8px DM Sans, sans-serif"
+    ctx.textAlign = "center"
+    ctx.fillText("PREDICTED", x, y - 36)
+    ctx.restore()
+  }
   if (visitors.some((item) => distance(item.x, item.y, x, y) < ALERT_DISTANCE)) {
     ctx.strokeStyle = `rgba(239,221,151,${.22 + Math.sin(now * .006) * .08})`
     ctx.lineWidth = 1.5
@@ -1579,6 +2239,23 @@ function draw(now) {
   ctx.save()
   ctx.clearRect(-offsetX / viewScale, -offsetY / viewScale, canvas.width / viewScale, canvas.height / viewScale)
   drawBackground(now)
+  if (visitorHeatmapVisible) {
+    for (const forecast of visitorHeatmapForecasts.values()) {
+      const peak = Math.max(...forecast.cells.map((cell) => cell.probability), 0)
+      if (peak <= 0) continue
+      for (const cell of forecast.cells) {
+        const intensity = cell.probability / peak
+        if (intensity < .04) continue
+        ctx.fillStyle = `rgba(255, 104, 67, ${intensity * .34})`
+        ctx.fillRect(
+          cell.column * forecast.cellSize,
+          cell.row * forecast.cellSize,
+          forecast.cellSize,
+          forecast.cellSize
+        )
+      }
+    }
+  }
   // Tree order creates a little depth; lower trees overlap more foreground.
   trees
     .map((tree, index) => ({ tree, index }))
@@ -1637,6 +2314,7 @@ function frame(now) {
   // 1. Update modular input provider
   visitorInput.update(WORLD_W, WORLD_H)
   visitors = visitorInput.getVisitors()
+  updateVisitorHeatmapForecasts(now)
   updateVisitorApproachSpeeds(dt)
   updateVisitorHavens(now)
 
@@ -1655,6 +2333,7 @@ function frame(now) {
   for (const creature of butterflies) updateButterfly(creature, dt, now)
   updateEnvironment(dt, now)
   logBirdStateChanges(now)
+  for (const ev of predictionEvaluators) ev.resolve(now)
   draw(now)
   requestAnimationFrame(frame)
 }

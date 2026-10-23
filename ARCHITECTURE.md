@@ -183,6 +183,87 @@ The important rule is:
 
 > The animation loop coordinates systems; individual systems should remain responsible for their own domain.
 
+## 4.1 Prediction and early-warning pipeline
+
+The 2D demo also runs a prediction pipeline each frame:
+
+```text
+Mouse / camera visitor positions
+        ↓
+Recent position and visitor-to-butterfly distance samples
+        ↓
+Trend predictor + visitor-location heatmap predictor
+        ↓
+PredictionEvaluator records warnings and outcomes
+        ↓
+V3Trend or V3Heatmap may trigger an early butterfly FLEE
+V3Heatmap cues perched birds, then may move them to a safer tree
+```
+
+`PredictionTrend.js` estimates how quickly the distance between a particular
+visitor and butterfly is shrinking. It compares the current distance with a
+sample from roughly 450–900 ms earlier, choosing one near 600 ms. Positive
+closing speed is supplied to `PredictionEngineV3.js`; movement away does not
+increase risk. The engine also reads visitor speed directly: a faster visitor
+can be treated as approaching sooner, while slow movement contributes less
+risk at the same distance. The original V3 inputs and behavior remain available
+as a baseline.
+
+`VisitorHeatmap.js` estimates where each visitor may be in 1.5 seconds. It
+samples the visitor's position, estimates recent horizontal and vertical
+movement, and projects that movement forward. It places a probability
+distribution over a 50 px grid, centered on the projected position. Faster
+movement creates a wider, less certain distribution and also raises the
+behavior-risk multiplier. Slow or stationary movement scales down the chance
+that a forecast visitor will disturb an animal, even when the projected
+position is similar: the speed multiplier rises from 0.12 at rest to 1.0 at
+300 px/s. If there is not enough movement history, the forecast stays centered
+on the current position. Invalid and implausibly fast movement samples are
+ignored. The predictor also scores
+each location forecast against the visitor's actual location at the end of the
+horizon, reporting mean/median position error and the percentage within one
+grid cell. Forecasts without an observed outcome (for example, when a pointer
+leaves the canvas) are counted separately instead of treated as misses.
+
+For each butterfly or bird perch, the heatmap predictor adds up the probability
+in grid cells within the normal flee distance (182 px). Calm visitors are
+ignored, and risks from multiple visitors are combined. A score of 0.5 or
+higher is a strong warning. Scores from 0.25 cue a perched bird to flutter;
+at 0.5, a perched bird can fly to an available tree far from the projected
+visitor location. An active bird haven takes priority. Reactions can re-arm
+after the visitor retreats beyond the safe distance and the warning stays low
+for 850 ms, or sooner if that visitor becomes calm or leaves.
+
+For butterflies, either V3Trend or V3Heatmap can trigger early flight while
+ordinary threat is still below its flee threshold. Episodes include a
+`predictionSource` label (`V3Trend`, `V3Heatmap`, or both) so reports distinguish
+prediction-initiated flight from normal threat-driven behavior. The heatmap is
+therefore no longer only shadow-mode; its animal responses are active and
+should be evaluated carefully against false alarms as well as useful early
+reactions. Butterfly prediction warnings have a visible amber ring/label and
+faster wing flutter. Per-visitor re-arming also waits for a clear retreat from
+the safe boundary and a low-risk interval, preventing a single encounter from
+causing constant repeated flights while allowing a new approach to trigger
+again.
+
+The trend-enabled V3 predictor **does** trigger early flight. When it predicts
+a disturbance before the normal threat threshold, the butterfly chooses an
+escape direction away from the visitor. A short recovery hold avoids rapidly
+switching between FLEE and RETURN. Evaluator episodes are marked when a
+predictor initiated the flee, so these intervention-driven outcomes can be
+separated from independent predictions.
+
+For local inspection in the browser console:
+
+* `comparePredictors()` compares V3, V3Trend, V3Heatmap, and V2 metrics.
+* `predictionReport()` prints their summaries and flee episodes.
+* `visitorHeatmapReport()` returns current visitor forecasts, grids, and
+  per-visitor location-forecast accuracy.
+* `toggleVisitorHeatmap()` shows or hides the forecast overlay on the forest.
+* `downloadPredictions()` downloads the metrics, episodes, and heatmap grids.
+* The console logs `[Butterfly] ... (V3Heatmap prediction)` and
+  `[BirdPrediction]` when a forecast causes an early animal response.
+
 ---
 
 # 5. Main Application

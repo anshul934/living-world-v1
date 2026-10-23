@@ -3,17 +3,80 @@ import {
   HandLandmarker
 } from "@mediapipe/tasks-vision";
 
-// Velocity-Adaptive Smoothing Constants (Time Constants in Seconds)
-const SMOOTHING_TC_SLOW = 0.12;  // Heavy smoothing when still (prevents jitter)
-const SMOOTHING_TC_FAST = 0.015; // Minimal smoothing when moving fast (eliminates lag)
-const VELOCITY_THRESHOLD = 1.2;  // Speed in norm-units/sec where max responsiveness kicks in
+// ---------------------------------------------------------------------------
+// Tuning constants
+// ---------------------------------------------------------------------------
 
-const DEAD_ZONE = 0.003;         // Reduced so rapid acceleration isn't ignored
-const TRACKING_GRACE_MS = 140;
+// One Euro filter (replaces the old lerp + dead zone). Coordinates are
+// normalised 0..1. minCutoff = smoothing while the hand is still (lower = less
+// jitter, more lag). beta = how quickly smoothing relaxes as the hand speeds up
+// (higher = less lag while moving, more jitter).
+const ONE_EURO_MIN_CUTOFF = 1.2;
+const ONE_EURO_BETA = 20;
+const ONE_EURO_D_CUTOFF = 1.0;
+
+// Single-frame landmark teleports are rejected until they persist.
+const MAX_PLAUSIBLE_SPEED = 8;     // norm-units/sec
+const MIN_GLITCH_JUMP = 0.08;      // norm-units
+const GLITCH_CONFIRM_FRAMES = 3;
+
+// A lost hand is held in place this long before it disappears.
+const TRACKING_GRACE_MS = 250;
 const GESTURE_CONFIRMATION_MS = 140;
+const HAND_CONFIDENCE_THRESHOLD = 0.8;
 
-const PINCH_THRESHOLD = 0.06;
-const RELEASE_THRESHOLD = 0.09;
+// Pinch thresholds are ratios of thumb-index distance to palm size, so they
+// work at any distance from the camera.
+const PINCH_RATIO = 0.30;
+const RELEASE_RATIO = 0.50;
+const PINCH_CONFIRM_MS = 45;       // a pinch change must persist this long
+const POINTER_BLEND_START_RATIO = 0.80; // pointer slides from index tip to
+                                        // pinch midpoint between this ratio
+                                        // and PINCH_RATIO, so pinching does
+                                        // not make the cursor jump
+
+// Hand identity matching.
+const MATCH_BASE_DISTANCE = 0.35;
+const MATCH_SPEED_ALLOWANCE = 3.0; // extra norm-units allowed per second unseen
+const MATCH_MAX_DISTANCE = 0.7;
+const HANDEDNESS_MISMATCH_PENALTY = 1.15; // soft preference only: labels flip
+
+const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+const smoothstep = (t) => t * t * (3 - 2 * t);
+
+class OneEuroFilter {
+  constructor(minCutoff, beta, dCutoff) {
+    this.minCutoff = minCutoff;
+    this.beta = beta;
+    this.dCutoff = dCutoff;
+    this.prevRaw = null;
+    this.prevFiltered = null;
+    this.prevDeriv = 0;
+  }
+
+  static alpha(cutoff, dt) {
+    const tau = 1 / (2 * Math.PI * cutoff);
+    return 1 / (1 + tau / dt);
+  }
+
+  reset(value) {
+    this.prevRaw = value;
+    this.prevFiltered = value;
+    this.prevDeriv = 0;
+    return value;
+  }
+
+  filter(value, dtSeconds) {
+    if (this.prevFiltered === null) return this.reset(value);
+    const dt = clamp(dtSeconds, 0.004, 0.1);
+    const deriv = (value - this.prevRaw) / dt;
+    this.prevDeriv += OneEuroFilter.alpha(this.dCutoff, dt) * (deriv - this.prevDeriv);
+    const cutoff = this.minCutoff + this.beta * Math.abs(this.prevDeriv);
+    this.prevFiltered += OneEuroFilter.alpha(cutoff, dt) * (value - this.prevFiltered);
+    this.prevRaw = value;
+    return this.prevFiltered;
+  }
+}
 
 export class CameraInput {
   constructor(videoElement, statusElement) {
@@ -23,9 +86,8 @@ export class CameraInput {
     this.handLandmarker = null;
     this.isReady = false;
     this.lastVideoTime = -1;
+    this.lastTimestamp = -1;
 
-    this.smoothedX = null;
-    this.smoothedY = null;
     this.wasPinching = false;
     this.pinchStarted = false;
     this.handStates = new Map();
@@ -51,7 +113,6 @@ export class CameraInput {
     try {
       this.setStatus("Requesting Camera...");
 
-      // OPTIMIZATION: 480x360 @ 60fps dramatically cuts camera pipe latency
       const stream = await navigator.mediaDevices.getUserMedia({
         video: {
           width: { ideal: 480 },
@@ -82,18 +143,26 @@ export class CameraInput {
         "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.0/wasm"
       );
 
-      this.handLandmarker = await HandLandmarker.createFromOptions(
-        vision,
-        {
+      const createLandmarker = (delegate) =>
+        HandLandmarker.createFromOptions(vision, {
           baseOptions: {
             modelAssetPath:
               "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
-            delegate: "GPU"
+            delegate
           },
           runningMode: "VIDEO",
-          numHands: 4
-        }
-      );
+          numHands: 4,
+          minHandDetectionConfidence: HAND_CONFIDENCE_THRESHOLD,
+          minHandPresenceConfidence: HAND_CONFIDENCE_THRESHOLD,
+          minTrackingConfidence: HAND_CONFIDENCE_THRESHOLD
+        });
+
+      try {
+        this.handLandmarker = await createLandmarker("GPU");
+      } catch (gpuErr) {
+        console.warn("[CameraInput] GPU delegate failed, falling back to CPU:", gpuErr);
+        this.handLandmarker = await createLandmarker("CPU");
+      }
 
       this.isReady = true;
       this.setStatus("Camera: Tracking Active");
@@ -103,36 +172,34 @@ export class CameraInput {
     }
   }
 
-  lerp(current, target, alpha) {
-    return current + (target - current) * alpha;
+  // Distances use x scaled by the video aspect ratio so they are isotropic.
+  dist(a, b, aspect) {
+    return Math.hypot((a.x - b.x) * aspect, a.y - b.y);
   }
 
-  smoothCoordinate(current, target, alpha) {
-    if (current === null) return target;
-    if (Math.abs(target - current) < DEAD_ZONE) {
-      return current;
-    }
-    return this.lerp(current, target, alpha);
+  palmSize(landmarks, aspect) {
+    return Math.max(
+      this.dist(landmarks[0], landmarks[9], aspect),
+      this.dist(landmarks[5], landmarks[17], aspect),
+      0.02
+    );
   }
 
-  classifyGesture(landmarks) {
+  classifyGesture(landmarks, aspect) {
     if (!landmarks || landmarks.length < 21) return null;
 
     const wrist = landmarks[0];
-    const distanceFromWrist = (point) =>
-      Math.hypot(point.x - wrist.x, point.y - wrist.y);
+    const fromWrist = (p) => this.dist(p, wrist, aspect);
     const fingers = [
       [landmarks[8], landmarks[6]],
       [landmarks[12], landmarks[10]],
       [landmarks[16], landmarks[14]],
       [landmarks[20], landmarks[18]]
     ];
-    const extended = fingers.map(([tip, joint]) =>
-      distanceFromWrist(tip) > distanceFromWrist(joint) * 1.12
-    );
+    const extended = fingers.map(([tip, joint]) => fromWrist(tip) > fromWrist(joint) * 1.12);
 
     if (extended.every(Boolean)) return "open-palm";
-    if (extended.every((isExtended) => !isExtended)) return "fist";
+    if (extended.every((e) => !e)) return "fist";
     return null;
   }
 
@@ -151,6 +218,85 @@ export class CameraInput {
     };
   }
 
+  // Drops duplicate detections of the same physical hand (MediaPipe sometimes
+  // reports one hand twice, which showed up as a ghost visitor).
+  buildDetections(results, aspect) {
+    const all = (results.landmarks ?? [])
+      .map((landmarks, index) => {
+        const category = results.handedness?.[index]?.[0];
+        return {
+          landmarks,
+          handedness: category?.categoryName ?? null,
+          score: category?.score ?? 0
+        };
+      })
+      .filter((d) => d.landmarks && d.landmarks.length >= 21)
+      .map((d) => ({ ...d, palm: this.palmSize(d.landmarks, aspect) }))
+      .sort((a, b) => b.score - a.score);
+
+    const kept = [];
+    for (const d of all) {
+      const duplicate = kept.some((k) =>
+        this.dist(k.landmarks[9], d.landmarks[9], aspect) < Math.max(k.palm, d.palm) * 0.5
+      );
+      if (!duplicate) kept.push(d);
+    }
+    return kept;
+  }
+
+  // Global nearest-first assignment of detections to known hands. Handedness
+  // labels flip frame to frame, so they only bias the match slightly.
+  matchDetections(detections, now) {
+    const pairs = [];
+    detections.forEach((det, i) => {
+      const x = 1 - det.landmarks[8].x;
+      const y = det.landmarks[8].y;
+      for (const [id, state] of this.handStates) {
+        const unseenSec = Math.max((now - state.lastSeenAt) / 1000, 0);
+        const limit = Math.min(
+          MATCH_BASE_DISTANCE + MATCH_SPEED_ALLOWANCE * unseenSec,
+          MATCH_MAX_DISTANCE
+        );
+        const d = Math.hypot(state.rawX - x, state.rawY - y);
+        if (d > limit) continue;
+        const penalty = state.handedness === det.handedness ? 1 : HANDEDNESS_MISMATCH_PENALTY;
+        pairs.push({ i, id, score: d * penalty });
+      }
+    });
+    pairs.sort((a, b) => a.score - b.score);
+
+    const ids = new Array(detections.length).fill(null);
+    const usedIds = new Set();
+    for (const { i, id } of pairs) {
+      if (ids[i] !== null || usedIds.has(id)) continue;
+      ids[i] = id;
+      usedIds.add(id);
+    }
+
+    // Second pass: if a known, still-live hand has no detection while some
+    // detection has no hand, assume it is the same hand that jumped (a tracker
+    // glitch) rather than a brand new one. Glitch rejection in update() then
+    // decides whether the jump is real. A genuinely additional hand is
+    // unaffected: it only gets here when no known hand is left unmatched.
+    const lostIds = [...this.handStates.entries()]
+      .filter(([id, state]) => !usedIds.has(id) && now - state.lastSeenAt <= TRACKING_GRACE_MS)
+      .map(([id]) => id);
+    detections.forEach((det, i) => {
+      if (ids[i] !== null || lostIds.length === 0) return;
+      const x = 1 - det.landmarks[8].x;
+      const y = det.landmarks[8].y;
+      let best = 0;
+      let bestDist = Infinity;
+      lostIds.forEach((id, k) => {
+        const state = this.handStates.get(id);
+        const d = Math.hypot(state.rawX - x, state.rawY - y);
+        if (d < bestDist) { bestDist = d; best = k; }
+      });
+      ids[i] = lostIds.splice(best, 1)[0];
+    });
+    return ids;
+  }
+
   update() {
     if (
       !this.isReady ||
@@ -166,92 +312,118 @@ export class CameraInput {
     try {
       this.pinchStarted = false;
       const now = performance.now();
+      const timestamp = Math.max(now, this.lastTimestamp + 1);
+      this.lastTimestamp = timestamp;
       const suppressPinchStarts = this.suppressPinchStarts;
-      const results = this.handLandmarker.detectForVideo(
-        this.video,
-        now
-      );
+      const aspect = this.video.videoWidth && this.video.videoHeight
+        ? this.video.videoWidth / this.video.videoHeight
+        : 4 / 3;
+
+      const results = this.handLandmarker.detectForVideo(this.video, timestamp);
+      const detections = this.buildDetections(results, aspect);
+      const matchedIds = this.matchDetections(detections, now);
 
       const currentHands = new Set();
-      const detectedVisitors = (results.landmarks ?? []).map((landmarks, index) => {
-        const handedness = results.handedness?.[index]?.[0]?.categoryName;
+      const detectedVisitors = detections.map((det, index) => {
+        const { landmarks, handedness } = det;
         const indexTip = landmarks[8];
         const thumbTip = landmarks[4];
-        const targetX = 1 - indexTip.x;
-        const targetY = indexTip.y;
 
-        // BUMPED MATCH DISTANCE: 0.25 -> 0.55 so fast motion doesn't re-assign hand IDs
-        const matchingHands = [...this.handStates.entries()]
-          .filter(([id, state]) =>
-            !currentHands.has(id) &&
-            state.handedness === (handedness ?? null)
-          )
-          .map(([id, state]) => ({
-            id,
-            state,
-            distance: Math.hypot(state.normX - targetX, state.normY - targetY)
-          }))
-          .filter(({ distance }) => distance <= 0.55)
-          .sort((a, b) => a.distance - b.distance);
-
-        const id = matchingHands[0]?.id ?? `camera:hand-${this.nextHandId++}`;
+        let id = matchedIds[index];
+        if (id === null) id = `camera:hand-${this.nextHandId++}`;
         currentHands.add(id);
-
-        const pinchDistance = Math.hypot(
-          indexTip.x - thumbTip.x,
-          indexTip.y - thumbTip.y
-        );
         const previous = this.handStates.get(id);
 
+        // --- pinch measurement, normalised by hand size -------------------
+        const pinchRatio = this.dist(indexTip, thumbTip, aspect) / det.palm;
+
+        // --- pointer: index tip, sliding to the pinch midpoint on pinch ----
+        const midX = 1 - (indexTip.x + thumbTip.x) / 2;
+        const midY = (indexTip.y + thumbTip.y) / 2;
+        const blend = smoothstep(clamp(
+          (POINTER_BLEND_START_RATIO - pinchRatio) / (POINTER_BLEND_START_RATIO - PINCH_RATIO), 0, 1
+        ));
+        const rawX = (1 - indexTip.x) * (1 - blend) + midX * blend;
+        const rawY = indexTip.y * (1 - blend) + midY * blend;
+
+        const elapsed = previous
+          ? Math.max((now - previous.lastSeenAt) / 1000, 0.008)
+          : 0.016;
+
+        // --- glitch rejection ---------------------------------------------
+        let jumpFrames = 0;
+        let resetFilters = false;
+        if (previous) {
+          const jump = Math.hypot(rawX - previous.rawX, rawY - previous.rawY);
+          if (jump > MIN_GLITCH_JUMP && jump / elapsed > MAX_PLAUSIBLE_SPEED) {
+            jumpFrames = (previous.jumpFrames ?? 0) + 1;
+            if (jumpFrames < GLITCH_CONFIRM_FRAMES) {
+              // Hold the last good state for this frame.
+              this.handStates.set(id, { ...previous, jumpFrames, lastSeenAt: now });
+              return {
+                id,
+                normX: previous.normX,
+                normY: previous.normY,
+                clickNormX: previous.normX,
+                clickNormY: previous.normY,
+                gesture: previous.gesture,
+                active: true,
+                isPinching: previous.isPinching,
+                isClicked: false
+              };
+            }
+            // The jump persisted: treat it as real and snap to it.
+            resetFilters = true;
+            jumpFrames = 0;
+          }
+        }
+
+        // --- smoothing ----------------------------------------------------
+        const filterX = resetFilters || !previous
+          ? new OneEuroFilter(ONE_EURO_MIN_CUTOFF, ONE_EURO_BETA, ONE_EURO_D_CUTOFF)
+          : previous.filterX;
+        const filterY = resetFilters || !previous
+          ? new OneEuroFilter(ONE_EURO_MIN_CUTOFF, ONE_EURO_BETA, ONE_EURO_D_CUTOFF)
+          : previous.filterY;
+        const normX = filterX.filter(rawX, elapsed);
+        const normY = filterY.filter(rawY, elapsed);
+
+        // --- pinch with hysteresis and a short confirmation window ----------
+        const wasPinching = previous?.isPinching ?? false;
+        const wantsPinch = wasPinching
+          ? pinchRatio < RELEASE_RATIO
+          : pinchRatio < PINCH_RATIO;
+        let isPinching = wasPinching;
+        let pinchFlipSince = null;
+        if (wantsPinch !== wasPinching) {
+          pinchFlipSince = previous?.pinchFlipSince ?? now;
+          if (!previous || now - pinchFlipSince >= PINCH_CONFIRM_MS) {
+            isPinching = wantsPinch;
+            pinchFlipSince = null;
+          }
+        }
+
+        const pinchStarted = isPinching && !wasPinching && !suppressPinchStarts;
+        if (pinchStarted) this.pinchStartedIds.add(id);
+
         const stabilizedGesture = this.stabilizeGesture(
-          this.classifyGesture(landmarks),
+          this.classifyGesture(landmarks, aspect),
           previous,
           now
         );
 
-        const elapsed = previous
-          ? Math.max((now - previous.lastSeenAt) / 1000, 0.001)
-          : 0.016;
-
-        // -------------------------------------------------------------
-        // VELOCITY-ADAPTIVE SMOOTHING LOGIC
-        // -------------------------------------------------------------
-        let dynamicTimeConstant = SMOOTHING_TC_SLOW;
-
-        if (previous) {
-          // Calculate Euclidean movement velocity (distance in screen units per second)
-          const distMoved = Math.hypot(targetX - previous.normX, targetY - previous.normY);
-          const velocity = distMoved / elapsed; 
-
-          // Interpolate time constant based on speed (higher velocity -> smaller TC -> faster response)
-          const speedRatio = Math.min(velocity / VELOCITY_THRESHOLD, 1.0);
-          dynamicTimeConstant = SMOOTHING_TC_SLOW - speedRatio * (SMOOTHING_TC_SLOW - SMOOTHING_TC_FAST);
-        }
-
-        const smoothingAlpha = 1 - Math.exp(-elapsed / dynamicTimeConstant);
-        // -------------------------------------------------------------
-
-        const isPinching = previous?.isPinching
-          ? pinchDistance < RELEASE_THRESHOLD
-          : pinchDistance < PINCH_THRESHOLD;
-
-        const pinchStarted = isPinching &&
-          !previous?.isPinching &&
-          !suppressPinchStarts;
-
-        if (pinchStarted) this.pinchStartedIds.add(id);
-
-        const clickNormX = 1 - (indexTip.x + thumbTip.x) / 2;
-        const clickNormY = (indexTip.y + thumbTip.y) / 2;
-
-        const normX = this.smoothCoordinate(previous?.normX ?? null, targetX, smoothingAlpha);
-        const normY = this.smoothCoordinate(previous?.normY ?? null, targetY, smoothingAlpha);
-
         this.handStates.set(id, {
           ...stabilizedGesture,
+          seq: previous?.seq ?? this.nextSeq(id),
           normX,
           normY,
+          rawX,
+          rawY,
+          filterX,
+          filterY,
+          jumpFrames,
           isPinching,
+          pinchFlipSince,
           handedness: handedness ?? null,
           lastSeenAt: now
         });
@@ -260,8 +432,8 @@ export class CameraInput {
           id,
           normX,
           normY,
-          clickNormX,
-          clickNormY,
+          clickNormX: midX,
+          clickNormY: midY,
           gesture: stabilizedGesture.gesture,
           active: true,
           isPinching,
@@ -269,12 +441,12 @@ export class CameraInput {
         };
       });
 
-      if (suppressPinchStarts && detectedVisitors.some((visitor) => !visitor.isPinching)) {
+      if (suppressPinchStarts && detectedVisitors.some((v) => !v.isPinching)) {
         this.suppressPinchStarts = false;
       }
 
       const retainedVisitors = [];
-      for (const id of this.handStates.keys()) {
+      for (const id of [...this.handStates.keys()]) {
         if (currentHands.has(id)) continue;
         const previous = this.handStates.get(id);
         if (now - previous.lastSeenAt <= TRACKING_GRACE_MS) {
@@ -292,8 +464,10 @@ export class CameraInput {
         }
       }
 
+      // Numeric order, so hand-10 does not sort before hand-2.
+      const order = (v) => this.handStates.get(v.id)?.seq ?? Number.MAX_SAFE_INTEGER;
       this.cameraVisitors = [...detectedVisitors, ...retainedVisitors]
-        .sort((a, b) => a.id.localeCompare(b.id));
+        .sort((a, b) => order(a) - order(b));
 
       const primaryHand = this.cameraVisitors[0];
       this.rawNormalizedState = primaryHand
@@ -303,16 +477,10 @@ export class CameraInput {
             active: true,
             isPinching: primaryHand.isPinching
           }
-        : {
-            normX: 0,
-            normY: 0,
-            active: false,
-            isPinching: false
-          };
+        : { normX: 0, normY: 0, active: false, isPinching: false };
 
       this.pinchStarted = this.pinchStartedIds.size > 0;
       this.wasPinching = this.cameraVisitors.some((hand) => hand.isPinching);
-
     } catch (err) {
       console.error("[CameraInput] Hand tracking failed:", err);
       this.cameraVisitors = [];
@@ -321,13 +489,14 @@ export class CameraInput {
       this.pinchStartedIds.clear();
       this.wasPinching = false;
       this.suppressPinchStarts = true;
-      this.rawNormalizedState = {
-        normX: 0,
-        normY: 0,
-        active: false,
-        isPinching: false
-      };
+      this.rawNormalizedState = { normX: 0, normY: 0, active: false, isPinching: false };
     }
+  }
+
+  // Stable creation order for a hand id ("camera:hand-7" -> 7).
+  nextSeq(id) {
+    const n = Number(String(id).split("-").pop());
+    return Number.isFinite(n) ? n : this.nextHandId;
   }
 
   getState() {

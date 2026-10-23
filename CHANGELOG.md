@@ -6,6 +6,30 @@ All significant development work, bug fixes, refactors, and feature additions ar
 
 ---
 
+# 2026-10-21 — Heatmap-Driven Animal Responses
+
+## Added
+
+* Connected high-confidence visitor heatmap warnings to preemptive butterfly flight, while retaining the trend-based trigger and normal threat response.
+* Added predictive readiness flutter for perched birds and early relocation to a tree farther from the forecast visitor position.
+* Preserved calm/haven behavior and added per-visitor re-arming to avoid repeated predictive flight during one encounter.
+* Added prediction-source labels to butterfly flee episodes and explicit bird prediction logs.
+* Updated the architecture documentation and added evaluator coverage for prediction-source labels.
+* Added an explicit movement-speed multiplier to heatmap risk and direct visitor-speed input to trend-based risk, making slow movement lower risk than fast movement at the same distance.
+* Added visible amber forecast cues for butterflies and birds, plus re-arming after a sustained safe retreat so repeated approach-and-retreat interactions can trigger again.
+
+# 2026-10-21 — Trend-Only V3 Evaluation and Early-Flee Response
+
+## Added
+
+* Added a distance-trend input to PredictionEngineV3 and a trend-only V3 candidate evaluated beside V3 and V2.
+* Let the trend candidate trigger butterfly flight before the ordinary threat threshold, while keeping the original V3 predictor shadow-only.
+* Tagged prediction-triggered flight episodes in reports so intervention-driven results are distinguishable from independent predictions.
+* Added tests for trend estimation, predictor warnings, evaluator trace compatibility, and prediction-triggered episode diagnostics.
+* Added a visitor-location heatmap forecast using recent movement projected onto a probabilistic 50 px world grid.
+* Initially added per-butterfly heatmap risk evaluation, forecast position-error metrics, report exports, and an optional browser overlay in shadow mode; the follow-up behavior connection is documented above.
+* Documented the trend-warning and visitor-heatmap architecture in `ARCHITECTURE.md`.
+
 # 2026-10-07 — Day 1: Project Foundation
 
 ## Added
@@ -549,3 +573,53 @@ Next:
 - Established this version as the behavior regression baseline.
 
 **Next:** Add diagnostics and formalize the threat-provider contract before implementing predictive threat estimation.
+
+
+## — Camera Tracking Stability and Predictive Analysis Baseline
+
+### Added
+- Added `src/ai/PredictionEngine.js` as the initial predictive-analysis module for LIVING WORLD V1.
+- Implemented a transparent heuristic disturbance-risk score using visitor distance, approach speed, and butterfly fear.
+- Added prediction diagnostics in `src/demo2d.js` to report risk scores, predicted disturbance, visitor information, and the configured prediction horizon.
+- Kept the prediction engine in shadow mode so its output does not directly change existing bird or butterfly behavior.
+
+### Changed
+- Reduced the camera input video resolution to reduce input-processing workload and improve tracking responsiveness.
+- Replaced the previous hand-position interpolation with a velocity-adaptive lerp approach to improve responsiveness when hands move quickly and help reduce tracking dropouts.
+- Updated the bird visitor-position fallback to handle missing or invalid visitor coordinates without attempting to read properties from a null target.
+- Changed the bird position fallback to use the bird's current coordinates when the visitor target is unavailable, rather than relying on potentially uninitialized target coordinates.
+
+### Fixed
+- Added null and coordinate-validity checks in `birdVisitorPosition()` to prevent an uncaught TypeError when a tracked visitor disappears during a bird investigation.
+- Addressed the invalid fallback destination that could send a bird toward the top-left corner when visitor coordinates became unavailable.
+
+### Validation
+- Observed a prediction diagnostic example with a risk score of `0.321` and `predictedDisturbance: false`.
+- Identified that butterfly diagnostic records may report `creatureId: undefined`; stable diagnostic identification remains to be completed.
+- Confirmed that the current prediction diagnostic is observational and does not establish that creature behavior is controlled by predictions.
+- Further validation is required for the bird return-flight behavior after visitor disappearance, prediction accuracy, calm-duration tracking, and prediction-versus-outcome records.
+
+### Next Steps
+- Correct butterfly identifiers in prediction diagnostics.
+- Validate prediction output across controlled visitor movement scenarios.
+- Track continuous visitor calm duration and pass the measured value to the predictor.
+- Record prediction snapshots and their observed outcomes for later evaluation.
+- Evaluate false positives and false negatives before integrating predictions into creature behavior.
+- Preserve existing bird and butterfly behavior as a regression baseline.
+
+
+## 2026-10-15 — Prediction Evaluator and PredictionEngineV2
+
+### Added
+- `PredictionEvaluator.js` (shadow mode): records predictions and checks for FLEE within the 1500 ms horizon.
+- `PredictionEngineV2.js`: threat- and fear-based risk score (threshold 0.3).
+
+### Validation (390 samples, 4 scenarios)
+- Old predictor never fired (max risk 0.625 vs 0.65 threshold).
+- V2: precision 49%, recall 83%, false-positive rate 31% (flee base rate 26%).
+- Hover-at-edge test is the main false-positive source; threat band 0.09–0.3 is ~50% flee.
+- Main unpredicted flees: calm visitor starts moving again; second visitor moving near a calm one.
+
+### Next
+- Test whether threat trend separates real approaches from near-misses.
+- Do not connect predictions to creature behavior yet.
