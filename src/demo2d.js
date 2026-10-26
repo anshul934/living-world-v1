@@ -1985,8 +1985,7 @@ function drawTree(tree, index, now) {
       false,
       hiddenBird.phase,
       hiddenBird.readiness,
-      hiddenBird.headingAngle,
-      hiddenBird.predictionReadiness
+      hiddenBird.headingAngle
     );
   }
 }
@@ -2039,8 +2038,7 @@ function drawBirdAt(
   flying = false,
   phase = 0,
   readiness = false,
-  headingAngle = 0,
-  predictionReadiness = false
+  headingAngle = 0
 ) {
   // The bird remains partly behind leaves until it feels safe enough to peek.
   const x = anchorX + 5
@@ -2053,9 +2051,6 @@ function drawBirdAt(
   const bodyWidth = readiness ? 1 + .05 * ((Math.sin(now * .012 + phase) + 1) / 2) : 1
   ctx.save()
   ctx.globalAlpha = flying ? 1 : .25 + peek * .75
-  // Tiny perched bird silhouette.
-  ctx.strokeStyle = "#d4d19a"; ctx.lineWidth = 2
-  ctx.beginPath(); ctx.moveTo(x - 18, y + 10); ctx.lineTo(x + 17, y + 10); ctx.stroke()
   ctx.translate(x, y)
   const facingLeft = Math.cos(headingAngle) < 0
   const tilt = Math.atan2(Math.sin(headingAngle), Math.abs(Math.cos(headingAngle)))
@@ -2072,26 +2067,6 @@ function drawBirdAt(
   ctx.fillStyle = "#172f26"
   ctx.beginPath(); ctx.arc(9, -8, 1.2, 0, Math.PI * 2); ctx.fill()
   ctx.restore()
-  if (peek > .55 || flying) {
-    ctx.save()
-    ctx.strokeStyle = "rgba(240,224,151,.65)"
-    ctx.beginPath(); ctx.arc(x, y, 22 + Math.sin(now * .005 + phase) * 2, 0, Math.PI * 2); ctx.stroke()
-    ctx.restore()
-  }
-  if (predictionReadiness) {
-    const pulse = .55 + Math.sin(now * .008 + phase) * .25
-    ctx.save()
-    ctx.strokeStyle = `rgba(255,190,94,${pulse})`
-    ctx.lineWidth = 2
-    ctx.beginPath()
-    ctx.arc(x, y - 5, 30 + Math.sin(now * .006 + phase) * 2, 0, Math.PI * 2)
-    ctx.stroke()
-    ctx.fillStyle = "#ffe0a3"
-    ctx.font = "700 8px DM Sans, sans-serif"
-    ctx.textAlign = "center"
-    ctx.fillText("FORECAST", x, y - 37)
-    ctx.restore()
-  }
 }
 function drawFlower(f, now, i) {
   const sway = Math.sin(now * .0018 + i * 1.4) * 2
@@ -2136,25 +2111,6 @@ function drawButterfly(creature, now) {
   ctx.strokeStyle = "#4c383f"; ctx.lineWidth = 1
   ctx.beginPath(); ctx.moveTo(-1, -7); ctx.quadraticCurveTo(-9, -18, -7, -19); ctx.moveTo(1, -7); ctx.quadraticCurveTo(9, -18, 7, -19); ctx.stroke()
   ctx.restore()
-  if (creature.predictedDisturbance && creature.state !== "FLEE") {
-    const pulse = .55 + Math.sin(now * .008 + x * .02) * .25
-    ctx.save()
-    ctx.strokeStyle = `rgba(255,190,94,${pulse})`
-    ctx.lineWidth = 2
-    ctx.beginPath()
-    ctx.arc(x, y, 31 + Math.sin(now * .006 + x * .02) * 2, 0, Math.PI * 2)
-    ctx.stroke()
-    ctx.fillStyle = "#ffe0a3"
-    ctx.font = "700 8px DM Sans, sans-serif"
-    ctx.textAlign = "center"
-    ctx.fillText("PREDICTED", x, y - 36)
-    ctx.restore()
-  }
-  if (visitors.some((item) => distance(item.x, item.y, x, y) < ALERT_DISTANCE)) {
-    ctx.strokeStyle = `rgba(239,221,151,${.22 + Math.sin(now * .006) * .08})`
-    ctx.lineWidth = 1.5
-    ctx.beginPath(); ctx.arc(x, y, 25 + Math.sin(now * .004) * 3, 0, Math.PI * 2); ctx.stroke()
-  }
 }
 function drawVisitor(item, now, index) {
   if (!item.active) return
