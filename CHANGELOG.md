@@ -2,624 +2,120 @@
 
 ## Changelog
 
-All significant development work, bug fixes, refactors, and feature additions are recorded here in chronological order.
+All significant features, fixes, and refactors, in order. Each entry is an update.
 
 ---
 
-# 2026-10-21 — Heatmap-Driven Animal Responses
+## Update 1 — Project Foundation
+* Created the Vite project and installed Three.js.
+* Built the initial scene: perspective camera, WebGL renderer, ambient light, directional sunlight, visible sun, ground plane, procedural trees, grass patches, fullscreen CSS.
+* Result: a basic 3D forest rendering locally in Chrome.
 
-## Added
+## Update 2 — Butterfly and Visitor Input
+* Added `Butterfly.js` (mesh, position, velocity, continuous movement, world-boundary clamping).
+* Added `VisitorInput.js` (mouse tracking, raycasting against a ground plane) and `InteractionEngine.js` (distance, danger detection, escape direction).
+* Separated input from behavior: `Mouse -> VisitorInput -> InteractionEngine -> Butterfly`.
 
-* Connected high-confidence visitor heatmap warnings to preemptive butterfly flight, while retaining the trend-based trigger and normal threat response.
-* Added predictive readiness flutter for perched birds and early relocation to a tree farther from the forecast visitor position.
-* Preserved calm/haven behavior and added per-visitor re-arming to avoid repeated predictive flight during one encounter.
-* Added prediction-source labels to butterfly flee episodes and explicit bird prediction logs.
-* Updated the architecture documentation and added evaluator coverage for prediction-source labels.
-* Added an explicit movement-speed multiplier to heatmap risk and direct visitor-speed input to trend-based risk, making slow movement lower risk than fast movement at the same distance.
-* Added visible amber forecast cues for butterflies and birds, plus re-arming after a sustained safe retreat so repeated approach-and-retreat interactions can trigger again.
+## Update 3 — Mouse-to-World Fixes
+* **Coordinate bug:** the approximate screen-to-world conversion was inaccurate. Replaced with proper raycasting (NDC -> camera ray -> ground intersection).
+* **False visitor detection:** the butterfly reacted to the default visitor position. Added a `hasInput` guard so interaction is ignored until real mouse input arrives.
+* **Viewport mismatch:** mouse normalization used the window size. It now uses `renderer.domElement.getBoundingClientRect()`, so it stays correct if the canvas is resized or embedded.
 
-# 2026-10-21 — Trend-Only V3 Evaluation and Early-Flee Response
+## Update 4 — Behavior Engine
+* Added `BehaviorEngine.js` with the state machine REST, EXPLORE, ALERT, FLEE, RETURN.
+* **Fixed runtime error:** a missing `handleStateChange()` stopped the butterfly. Replaced with an explicit `changeState()`.
+* **Vector consistency:** behavior now returns `THREE.Vector3` velocity, matching `Butterfly.js`.
+* **REST timer:** added a rest duration so the butterfly does not rest forever.
+* **Exploration fix:** replaced the fixed explore direction (which pinned the butterfly to a corner) with random targets inside the world, re-picked on arrival or timeout.
 
-## Added
+## Update 5 — Documentation System
+* Created `CHANGELOG.md`, `ARCHITECTURE.md`, and `DEVELOPMENT_LOG.md`, each with a separate role (changes, architecture/contracts, detailed reasoning).
 
-* Added a distance-trend input to PredictionEngineV3 and a trend-only V3 candidate evaluated beside V3 and V2.
-* Let the trend candidate trigger butterfly flight before the ordinary threat threshold, while keeping the original V3 predictor shadow-only.
-* Tagged prediction-triggered flight episodes in reports so intervention-driven results are distinguishable from independent predictions.
-* Added tests for trend estimation, predictor warnings, evaluator trace compatibility, and prediction-triggered episode diagnostics.
-* Added a visitor-location heatmap forecast using recent movement projected onto a probabilistic 50 px world grid.
-* Initially added per-butterfly heatmap risk evaluation, forecast position-error metrics, report exports, and an optional browser overlay in shadow mode; the follow-up behavior connection is documented above.
-* Documented the trend-warning and visitor-heatmap architecture in `ARCHITECTURE.md`.
+## Update 6 — Richer Behavior Model
+* Added fear and energy (0–1) with per-second rates, touch/maintain distances, and gentle vs. rapid approach-speed responses.
+* RETURN now navigates to the nearest flower; exploration targets real flower positions.
+* Added escape targets for FLEE, fear/energy-scaled explore speed, and throttled status logging.
+* Added 8 target flowers to the 3D scene and a `THREE.Timer` for frame time.
 
-# 2026-10-07 — Day 1: Project Foundation
+## Update 7 — 2D Demo (`demo2d.js`)
+* Built a 2D canvas version of the forest (1000x650 world) as the main demo: two butterflies, flowers, trees, birds, grass, and ambient effects, with DPR-aware scaling and a polished UI (`demo2d.css`).
+* Added the shared `ThreatProvider` (threat intensity and away-vector) used by all creatures.
+* Added CURIOUS (orbiting a calm visitor), threat orientation (butterfly turns toward a mild threat), safer-direction escape sampling, and smooth heading/flutter.
+* Added birds: peeking perched birds, readiness flutter, shared-owner curiosity flights, and tree clicks/hover that rustle trees and relocate birds.
+* The 3D version is kept as the early baseline.
 
-## Added
+## Update 8 — Camera Input (MediaPipe)
+* Added `CameraInput.js` with MediaPipe HandLandmarker: up to 4 hands, index finger as pointer, pinch-to-click with hysteresis, multi-visitor support, and a camera preview panel.
+* Added gestures: open palm and fist.
+* Added **safe havens**: holding a gesture still for 3.5 s makes butterflies (open palm) or birds (fist) gather at the visitor. Reservation logic allows one visitor per haven type, with cue messages for others. Havens end on movement, gesture change, or threat.
+* Visitors now carry stable IDs, enabling per-visitor behavior.
 
-* Created the initial Vite project.
-* Configured the project to run locally in the browser.
-* Installed Three.js.
-* Created the initial Three.js scene.
-* Added a perspective camera.
-* Added the WebGL renderer.
-* Added ambient lighting.
-* Added directional sunlight.
-* Added a visible sun object.
-* Added a large green forest ground plane.
-* Added procedural/simple trees.
-* Added simple grass patches.
-* Added basic fullscreen CSS.
+## Update 9 — Behavior Validation Baseline
+* Validated six creature behaviors: birds investigating a motionless visitor, tree-click relocation, butterfly threat orientation, and safer-direction escape.
+* This version became the regression baseline before adding prediction.
 
-## Initial Camera
+## Update 10 — Camera Tracking Stability
+* Reduced the camera resolution to 480x360 at up to 60 fps to cut processing latency.
+* Replaced fixed-rate smoothing with **velocity-adaptive smoothing** (heavy when still, minimal when fast), with a small dead zone.
+* Raised the hand-matching distance to 0.55 so fast motion does not reassign hand IDs; added a 140 ms tracking grace period and 140 ms gesture confirmation.
+* Result: better responsiveness and fewer tracking dropouts.
 
-The camera was positioned approximately at:
+## Update 11 — Prediction Baseline (V1)
+* Added `PredictionEngine.js`, a transparent heuristic using distance, approach speed, and fear.
+* Added prediction diagnostics (risk score, predicted disturbance, visitor info, horizon) and kept it in shadow mode.
+* Fixed butterfly diagnostics reporting `creatureId: undefined` by giving each butterfly a stable id.
 
-```text
-x = 0
-y = 5
-z = 10
-```
+## Update 12 — Bird Visitor-Tracking Fix
+* `birdVisitorPosition()` now validates the visitor and its coordinates; a missing visitor falls back to the bird's last known position, then its tree.
+* Fixed a TypeError and a bird flying to the top-left corner when a visitor disappeared mid-investigation.
+* Bird last-known positions are now recorded every frame.
 
-## Lighting
+## Update 13 — Prediction Evaluation Framework
+* Added `PredictionEvaluator.js`: snapshots scored as TP/FP/FN/TN, plus per-flee episodes with entry inputs, a 6 s trace, and warning lead time.
+* Added a strict advance-warning rule (>= 50 ms lead, 500 ms off-grace, clock reset for each flee and ignoring time inside FLEE).
+* Added event grouping: no active visitor, calm-to-movement, continuing encounter, new disturbance candidate.
+* Added non-excluding input diagnostics: rapid boundary re-flee, high visitor speed, visitor absence, changed visitor ID, high-fear zero-threat false positives.
+* Added summary metrics (raw, evaluable, boundary-adjusted recall and median lead).
+* Prediction is now observed before the FLEE transition so flee entries use correct pre-flee inputs; frames that cause FLEE are skipped as snapshots.
+* Added tests (`PredictionEvaluator.test.js`) and console tools: `predictionReport()`, `downloadPredictions()`.
 
-Added a directional light representing the sun:
+## Update 14 — Predictor V2 and V3
+* **V2** (`PredictionEngineV2.js`): threat term plus fear term. Fear caused false positives with distant visitors, so it became the baseline.
+* **V3** (`PredictionEngineV3.js`): time-to-flee model, `(distance - 182) / closingSpeed`, ignoring fear. Includes a speed-glitch cap (600 px/s), lateral speed weighting, a capped proximity term reduced by stillness, noisy-or risk combination, and zero risk for calm visitors.
+* V3 is the primary predictor; V2 is evaluated on the same events for comparison (`comparePredictors()`).
+* Added V3 tests.
 
-```js
-const sun =
-  new THREE.DirectionalLight(
-    0xfff4cc,
-    1.5
-  )
+## Update 15 — Distance-Trend Predictor
+* Added `PredictionTrend.js`, estimating closing speed from a same-visitor distance sample 450–900 ms old and discarding implausible spikes.
+* Added the `V3Trend` candidate and its own evaluator; it warns even when instantaneous visitor motion is zero.
+* Added tests.
 
-sun.position.set(
-  -8,
-  10,
-  -15
-)
-```
+## Update 16 — Visitor Heatmap Predictor
+* Added `VisitorHeatmap.js`: a per-visitor probability grid (50 px cells) centered on the position forecast at the 1.5 s horizon, with speed-scaled spread, world clipping, and radius-probability risk.
+* Added speed-based risk scaling so slow or hovering visitors raise less risk.
+* Added forecast accuracy tracking (mean/median error, within-one-cell %).
+* Added the `V3Heatmap` candidate and evaluator, a toggleable overlay, and `visitorHeatmapReport()` / `toggleVisitorHeatmap()`.
+* Heatmap diagnostics are appended to flee traces. Added tests.
 
-## Result
+## Update 17 — Predictions Drive Behavior
+* **Butterflies:** Trend or Heatmap warnings now trigger an early FLEE while threat is still below 0.3, with the source recorded (`V3Trend`, `V3Heatmap`, or both). Added a per-visitor latch with re-arm and recovery timers to prevent flee loops, and a prediction-aware escape that works at zero current threat.
+* **Birds:** the heatmap forecast drives readiness flutter and early flights to the tree farthest from the predicted visitor position, with a per-visitor latch and re-arm.
+* Added visual cues: "PREDICTED" and "FORECAST" rings.
+* Evaluators now record `predictionTriggered` / `predictionSource` per flee episode.
+* V3 (primary) and V2 remain shadow-only.
+* Fixed the ordering of haven-clearing and the FLEE transition so the current frame's visitor data is observed first.
 
-The project successfully rendered a basic 3D forest environment locally in Chrome.
+## Update 18 — Extra Diagnostics
+* Added `[BirdDiag]`, `[BirdCuriosityDiag]`, and `[BirdPrediction]` logs covering bird state changes, investigation sessions, and forecast escapes.
+* Expanded `[PredictionDiag]` with trend and heatmap fields.
 
----
-
-# 2026-10-07 — Day 2: Butterfly and Visitor Input
-
-## Added
-
-* Created `Butterfly.js`.
-* Added the butterfly mesh.
-* Added butterfly world position.
-* Added butterfly velocity.
-* Added continuous butterfly movement.
-* Added world-boundary protection.
-* Created `VisitorInput.js`.
-* Added mouse tracking.
-* Added Three.js raycasting.
-* Added a horizontal ground plane for ray intersection.
-* Converted mouse input into a world-space visitor position.
-* Created `InteractionEngine.js`.
-* Added visitor/butterfly distance calculation.
-* Added danger-distance detection.
-* Added butterfly escape-direction calculation.
-
-## Architecture Refactor
-
-Visitor input was separated from butterfly behavior.
-
-The initial interaction pipeline became:
-
-```text
-Mouse
-  ↓
-VisitorInput
-  ↓
-InteractionEngine
-  ↓
-Butterfly
-```
-
-This prevents `Butterfly.js` from needing to know how the visitor is detected.
+## Update 19 — Remove 3D Prototype
+* Removed the legacy Three.js application entry point and supporting files: `index.html`, `src/main.js`, `src/style.css`, `src/ai/BehaviorEngine.js`, `src/creatures/Butterfly.js`, and `src/interaction/InteractionEngine.js`.
+* Kept `demo2d.html` as the application entry point and `src/demo2d.js` as the active 2D runtime.
+* Removed the tree-rustle outline and target-flower highlight from the 2D canvas rendering.
 
 ---
 
-# 2026-10-07 — Day 2: Initial Mouse Coordinate Bug
-
-## Problem
-
-The initial mouse-to-world implementation used an approximate screen-to-world calculation.
-
-The detected visitor position did not accurately correspond to the actual mouse location.
-
-## Cause
-
-Screen coordinates and Three.js world coordinates are different coordinate systems.
-
-An approximate conversion was insufficient for reliable interaction.
-
-## Fix
-
-Moved to a proper Three.js raycasting approach.
-
-The mouse position is converted into normalized device coordinates and then projected from the camera into the 3D scene.
-
-The ray is intersected with the forest ground plane.
-
-The resulting intersection point becomes the visitor's world position.
-
-## Result
-
-Visitor input became based on an actual 3D ray/ground intersection rather than a screen-coordinate approximation.
-
----
-
-# 2026-10-07 — Day 2: Initial False Visitor Detection
-
-## Problem
-
-The butterfly could sometimes detect the visitor before the mouse had actually been used.
-
-The interaction system could interpret the default visitor position as a real visitor position.
-
-## Fix
-
-Added:
-
-```js
-hasInput
-```
-
-to `VisitorInput`.
-
-The interaction engine now ignores visitor interaction until valid mouse input has been received.
-
-## Result
-
-The butterfly no longer starts in a false disturbance state simply because the visitor position initially exists at a default coordinate.
-
----
-
-# 2026-10-07 — Day 3: Behavior Engine
-
-## Added
-
-Created:
-
-```text
-src/ai/BehaviorEngine.js
-```
-
-The first behavioral state machine was introduced.
-
-States:
-
-```text
-REST
-EXPLORE
-ALERT
-FLEE
-RETURN
-```
-
-## Initial State Transitions
-
-The behavior system was designed around:
-
-```text
-REST
- ↓
-EXPLORE
- ↓
-ALERT
- ↓
-FLEE
- ↓
-RETURN
- ↓
-REST
-```
-
-with disturbance-dependent transitions.
-
----
-
-# 2026-10-07 — Day 3: Behavior Engine Runtime Error
-
-## Problem
-
-The butterfly stopped moving completely.
-
-The browser console reported:
-
-```text
-Uncaught TypeError:
-this.handleStateChange is not a function
-```
-
-The error originated from `BehaviorEngine.update()`.
-
-## Cause
-
-The behavior engine referenced a `handleStateChange()` method that was not actually defined in the current implementation.
-
-Because the exception occurred inside the animation loop, the behavior engine failed before returning a movement decision.
-
-Therefore:
-
-```text
-BehaviorEngine
-      ↓
-ERROR
-      ↓
-no behavior returned
-      ↓
-Butterfly.update() not supplied valid behavior
-      ↓
-butterfly stops
-```
-
-## Fix
-
-Replaced the incomplete behavior implementation with an explicit state-machine implementation.
-
-State transitions are now handled by a dedicated:
-
-```js
-changeState()
-```
-
-method.
-
-## Result
-
-The behavior engine can successfully return a behavior decision every animation frame.
-
----
-
-# 2026-10-07 — Day 3: Velocity Type Consistency
-
-## Problem
-
-`Butterfly.js` stores velocity as:
-
-```js
-THREE.Vector3
-```
-
-The behavior engine initially returned a plain JavaScript object:
-
-```js
-{
-  x: ...,
-  y: ...,
-  z: ...
-}
-```
-
-This created an inconsistent data contract.
-
-## Fix
-
-The behavior engine now creates:
-
-```js
-velocity:
-  new THREE.Vector3()
-```
-
-and modifies it using Three.js vector methods.
-
-The butterfly continues to use:
-
-```js
-this.velocity.copy(
-  behavior.velocity
-)
-```
-
-## Result
-
-Both systems now use the same vector representation.
-
----
-
-# 2026-10-07 — Day 3: REST Timer
-
-## Problem
-
-The butterfly could remain in REST indefinitely.
-
-This prevented normal exploration from beginning.
-
-## Fix
-
-Added a REST timer.
-
-Current configuration:
-
-```text
-REST duration = 5 seconds
-```
-
-After approximately five seconds without disturbance:
-
-```text
-REST → EXPLORE
-```
-
-## Result
-
-The butterfly now periodically begins exploring without requiring visitor interaction.
-
----
-
-# 2026-10-07 — Day 3: Fixed Exploration Direction Bug
-
-## Problem
-
-The butterfly initially explored using a fixed direction approximately equivalent to:
-
-```js
-new THREE.Vector3(
-  1,
-  0,
-  1
-)
-```
-
-This caused it to continuously move toward the same region of the forest.
-
-Eventually it reached the front-right boundary and became visually stuck there.
-
-## Cause
-
-The exploration system had no concept of:
-
-* exploration targets
-* random direction changes
-* exploration bounds
-* target completion
-
-## Fix
-
-Replaced the fixed exploration direction with randomly selected exploration targets.
-
-Targets are selected within approximately:
-
-```text
-X = -8 to +8
-Z = -8 to +8
-```
-
-The butterfly chooses a new target when:
-
-* it gets sufficiently close to the target, or
-* the target has existed for too long.
-
-## Result
-
-The butterfly now explores different regions of the forest instead of continuously travelling in one direction.
-
----
-
-# 2026-10-08 — Day 3: Mouse Coordinate Refinement
-
-## Problem
-
-Although raycasting was functioning, the world-space position did not always correspond precisely to the visible mouse-pointer position.
-
-## Cause
-
-The mouse coordinates were normalized against:
-
-```js
-window.innerWidth
-window.innerHeight
-```
-
-This assumes the Three.js canvas exactly matches the browser viewport.
-
-That assumption can become incorrect when the canvas is resized, embedded, or affected by layout/UI elements.
-
-## Fix
-
-`VisitorInput` now receives:
-
-```js
-renderer.domElement
-```
-
-and calculates the mouse position relative to:
-
-```js
-domElement.getBoundingClientRect()
-```
-
-The new pipeline is:
-
-```text
-Browser mouse position
-        ↓
-Canvas-relative coordinates
-        ↓
-Normalized Device Coordinates
-        ↓
-Three.js Raycaster
-        ↓
-Ground intersection
-        ↓
-Visitor world position
-```
-
-## Result
-
-Mouse-to-world conversion is now based on the actual rendering canvas rather than the browser viewport.
-
----
-
-# 2026-10-08 : Documentation System
-
-## Added
-
-Created project documentation structure:
-
-```text
-CHANGELOG.md
-ARCHITECTURE.md
-DEVELOPMENT_LOG.md
-```
-
-## Purpose
-
-Each document has a separate responsibility.
-
-### CHANGELOG.md
-
-Records:
-
-* daily changes
-* bug fixes
-* refactors
-* feature additions
-
-### ARCHITECTURE.md
-
-Records:
-
-* system architecture
-* data models
-* contracts
-* state machines
-* technical decisions
-
-### DEVELOPMENT_LOG.md
-
-Records:
-
-* detailed development history
-* implementation reasoning
-* problems encountered
-* debugging explanations
-* development-stage objectives
-
----
-
-# Current Status
-
-## Day 1
-
-```text
-COMPLETE
-```
-
-Completed:
-
-* Vite
-* Three.js
-* Scene
-* Camera
-* Renderer
-* Lighting
-* Sun
-* Ground
-* Trees
-* Grass
-
-## Day 2
-
-```text
-COMPLETE / REFINED
-```
-
-Completed:
-
-* Butterfly
-* Butterfly movement
-* Mouse input
-* Raycasting
-* Visitor world position
-* Interaction Engine
-* Distance calculation
-* Escape direction
-* Behavior Engine
-* REST
-* EXPLORE
-* ALERT
-* FLEE
-* RETURN
-* REST timer
-* Random exploration targets
-* Exploration boundaries
-* Mouse/canvas coordinate refinement
-
-Next:
-
-* Fear
-* Energy
-* Disturbance memory
-* Preferred flower
-* Proper return-to-flower behavior
-* More natural movement
-* Gradual turning
-
----
-
-## 2026-10-14 — Creature Behavior Validation Baseline
-
-- Validated the six existing creature behavior tests successfully.
-- Confirmed birds can investigate a motionless visitor after a waiting period.
-- Confirmed tree-click interactions trigger bird relocation.
-- Confirmed butterfly threat orientation and safer-direction escape behavior.
-- Confirmed the tested behaviors produce the expected results.
-- Established this version as the behavior regression baseline.
-
-**Next:** Add diagnostics and formalize the threat-provider contract before implementing predictive threat estimation.
-
-
-## — Camera Tracking Stability and Predictive Analysis Baseline
-
-### Added
-- Added `src/ai/PredictionEngine.js` as the initial predictive-analysis module for LIVING WORLD V1.
-- Implemented a transparent heuristic disturbance-risk score using visitor distance, approach speed, and butterfly fear.
-- Added prediction diagnostics in `src/demo2d.js` to report risk scores, predicted disturbance, visitor information, and the configured prediction horizon.
-- Kept the prediction engine in shadow mode so its output does not directly change existing bird or butterfly behavior.
-
-### Changed
-- Reduced the camera input video resolution to reduce input-processing workload and improve tracking responsiveness.
-- Replaced the previous hand-position interpolation with a velocity-adaptive lerp approach to improve responsiveness when hands move quickly and help reduce tracking dropouts.
-- Updated the bird visitor-position fallback to handle missing or invalid visitor coordinates without attempting to read properties from a null target.
-- Changed the bird position fallback to use the bird's current coordinates when the visitor target is unavailable, rather than relying on potentially uninitialized target coordinates.
-
-### Fixed
-- Added null and coordinate-validity checks in `birdVisitorPosition()` to prevent an uncaught TypeError when a tracked visitor disappears during a bird investigation.
-- Addressed the invalid fallback destination that could send a bird toward the top-left corner when visitor coordinates became unavailable.
-
-### Validation
-- Observed a prediction diagnostic example with a risk score of `0.321` and `predictedDisturbance: false`.
-- Identified that butterfly diagnostic records may report `creatureId: undefined`; stable diagnostic identification remains to be completed.
-- Confirmed that the current prediction diagnostic is observational and does not establish that creature behavior is controlled by predictions.
-- Further validation is required for the bird return-flight behavior after visitor disappearance, prediction accuracy, calm-duration tracking, and prediction-versus-outcome records.
-
-### Next Steps
-- Correct butterfly identifiers in prediction diagnostics.
-- Validate prediction output across controlled visitor movement scenarios.
-- Track continuous visitor calm duration and pass the measured value to the predictor.
-- Record prediction snapshots and their observed outcomes for later evaluation.
-- Evaluate false positives and false negatives before integrating predictions into creature behavior.
-- Preserve existing bird and butterfly behavior as a regression baseline.
-
-
-## 2026-10-15 — Prediction Evaluator and PredictionEngineV2
-
-### Added
-- `PredictionEvaluator.js` (shadow mode): records predictions and checks for FLEE within the 1500 ms horizon.
-- `PredictionEngineV2.js`: threat- and fear-based risk score (threshold 0.3).
-
-### Validation (390 samples, 4 scenarios)
-- Old predictor never fired (max risk 0.625 vs 0.65 threshold).
-- V2: precision 49%, recall 83%, false-positive rate 31% (flee base rate 26%).
-- Hover-at-edge test is the main false-positive source; threat band 0.09–0.3 is ~50% flee.
-- Main unpredicted flees: calm visitor starts moving again; second visitor moving near a calm one.
-
-### Next
-- Test whether threat trend separates real approaches from near-misses.
-- Do not connect predictions to creature behavior yet.
+## Current Status
+* Active demo: 2D forest with two butterflies, five birds, and multi-visitor mouse/camera input.
+* Behavior-driving predictors: V3Trend and V3Heatmap. Shadow evaluation: V3 and V2.

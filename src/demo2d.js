@@ -1954,11 +1954,6 @@ function drawTree(tree, index, now) {
     ctx.beginPath(); ctx.arc(x - tree.r * .18, y - tree.r * .2, tree.r * scale * .42, 0, Math.PI * 2); ctx.fill()
   })
 
-  if (influence > .04 || rustle > .08) {
-    ctx.strokeStyle = `rgba(228,220,143,${Math.max(influence * .32, rustle * .22)})`
-    ctx.lineWidth = 2
-    ctx.beginPath(); ctx.arc(tree.x, tree.y + 2, tree.r * 1.03 + Math.sin(now * .006) * 3, 0, Math.PI * 2); ctx.stroke()
-  }
   // Each bird peeks from its own occupied tree and hides when visitors approach.
 
   // Draw perched birds only. Flying birds are drawn once,
@@ -2081,12 +2076,6 @@ function drawFlower(f, now, i) {
     ctx.beginPath(); ctx.ellipse(cx + Math.cos(a) * 7 * f.scale, cy + Math.sin(a) * 7 * f.scale, 5 * f.scale, 3.5 * f.scale, a, 0, Math.PI * 2); ctx.fill()
   }
   ctx.fillStyle = "#e8c86f"; ctx.beginPath(); ctx.arc(cx, cy, 3.4 * f.scale, 0, Math.PI * 2); ctx.fill()
-  for (const creature of butterflies) {
-    if (i === creature.targetFlower && ["REST", "RETURN"].includes(creature.state)) {
-      ctx.strokeStyle = "rgba(239,222,153,.35)"
-      ctx.beginPath(); ctx.ellipse(f.x, f.y + 4, 22 + Math.sin(now * .004) * 2, 9, 0, 0, Math.PI * 2); ctx.stroke()
-    }
-  }
 }
 function drawButterfly(creature, now) {
   const x = creature.x, y = creature.y

@@ -1,1824 +1,297 @@
 # LIVING WORLD — V1
 
-## Architecture Specification
+## Architecture Specification (current version)
 
 ---
 
 # 1. Purpose
 
-This document defines the technical architecture of the LIVING WORLD V1 browser prototype.
+LIVING WORLD V1 is a browser prototype of a small forest whose creatures (butterflies and birds) react to one or more visitors. Visitors are controlled by mouse or by webcam hand tracking. Creature behavior is rule-based, extended with a short-horizon **disturbance prediction** layer that lets creatures react *before* a visitor actually frightens them.
 
-The architecture is designed around a simple principle:
+Core principle:
 
-> Input, interaction, behavior, movement, and rendering should remain separate systems.
-
-The current prototype uses mouse input, but the architecture is designed so that mouse input can later be replaced with camera/body-tracking input without requiring a rewrite of the creature behavior system.
+> Input, interaction, behavior, prediction, movement, and rendering remain separate responsibilities.
 
 ---
 
-# 2. High-Level Architecture
+# 2. Code Base
 
-The current architecture is:
+The active application is the 2D canvas demo, served from `demo2d.html` by the `npm run dev` script. The page loads `src/demo2d.js`, which owns the world state, creature behavior, prediction wiring, rendering, and animation loop. `VisitorInput` combines pointer and camera visitors; `CameraInput` provides MediaPipe hand tracking. Prediction algorithms and evaluation are separated into `src/ai/` modules.
 
-```text
-┌─────────────────────┐
-│   Visitor Input     │
-│   Mouse             │
-└──────────┬──────────┘
-           │
-           │ Visitor State
-           ↓
-┌─────────────────────┐
-│ Interaction Engine  │
-└──────────┬──────────┘
-           │
-           │ Interaction Data
-           ↓
-┌─────────────────────┐
-│  Behavior Engine    │
-│  State Machine      │
-└──────────┬──────────┘
-           │
-           │ Behavior Decision
-           ↓
-┌─────────────────────┐
-│ Butterfly Movement  │
-└──────────┬──────────┘
-           │
-           ↓
-┌─────────────────────┐
-│ Three.js Rendering  │
-└─────────────────────┘
-```
-
-The intended future architecture is:
-
-```text
-                 ┌──────────────────┐
-                 │ Visitor Input    │
-                 │ Mouse / Camera   │
-                 └────────┬─────────┘
-                          ↓
-                 ┌──────────────────┐
-                 │ Interaction     │
-                 │ Engine          │
-                 └────────┬─────────┘
-                          ↓
-                 ┌──────────────────┐
-                 │ Feature          │
-                 │ Extraction      │
-                 └────────┬─────────┘
-                          ↓
-                 ┌──────────────────┐
-                 │ Behavior Brain   │
-                 │ Rules / ML       │
-                 └────────┬─────────┘
-                          ↓
-                 ┌──────────────────┐
-                 │ Movement         │
-                 │ Controller       │
-                 └────────┬─────────┘
-                          ↓
-                 ┌──────────────────┐
-                 │ Three.js         │
-                 │ Rendering        │
-                 └──────────────────┘
-```
+The Three.js 3D prototype and the root `index.html` have been removed; use `demo2d.html` as the application entry point. The Three.js dependency remains listed in `package.json`, but the active 2D demo does not use it. The demo page provides the `#forest-canvas`, `#webcam-video`, and `#camera-status` elements expected by the runtime.
 
 ---
 
-# 3. Design Principles
-
-## 3.1 Separation of Responsibilities
-
-Each system should have one primary responsibility.
+# 3. File Map
 
 ```text
-VisitorInput
-    ↓
-"Where is the visitor?"
+src/
+  demo2d.js                 2D world: creatures, environment, rendering, frame loop, prediction wiring
+  demo2d.css                2D demo layout + camera preview styling
+  CameraInput.js            MediaPipe hand tracking -> normalized visitors
+  interaction/
+    VisitorInput.js         Mouse + camera provider -> visitor list
+  ai/
+    PredictionEngine.js     V1 heuristic predictor (historical)
+    PredictionEngineV2.js   V2 threat + fear predictor (baseline)
+    PredictionEngineV3.js   V3 time-to-flee predictor (primary)
+    PredictionTrend.js      Distance-trend closing-speed estimator
+    VisitorHeatmap.js       Visitor position forecast (probability grid)
+    PredictionEvaluator.js  Shadow evaluator: snapshots + flee episodes
+    PredictionEngine.test.js, PredictionEngineV3.test.js
+                              node:test suites for the prediction modules
+    PredictionTrend.test.js, VisitorHeatmap.test.js,
+    PredictionEvaluator.test.js
+                              node:test suites for the supporting modules
+```
 
-InteractionEngine
-    ↓
-"How is the visitor affecting the butterfly?"
 
-BehaviorEngine
-    ↓
-"What should the butterfly do?"
+---
 
-Movement
-    ↓
-"How should the butterfly physically move?"
+# 4. High-Level Data Flow (2D demo)
 
-Three.js
-    ↓
-"How should the world be rendered?"
+```text
+Mouse / Webcam hands
+        |
+VisitorInput (+ CameraInput provider)
+        |  visitors[] {id, x, y, active, gesture, isClicked, lastMovedAt}
+        v
+frame() in demo2d.js
+   |- Visitor heatmap forecasts (per visitor)
+   |- Approach speeds / velocities
+   |- Haven gesture tracking
+   |- Click / pinch handling (trees, birds)
+        |
+        +--> ThreatProvider  (threat intensity + escape vector)
+        |
+        +--> Prediction layer (V3, V3Trend, V3Heatmap, V2)
+        |        |-- Trend + Heatmap warnings -> predictive flee / bird escape
+        |        |-- All predictors -> PredictionEvaluator (shadow metrics)
+        v
+Butterfly state machine  /  Bird state logic
+        |
+        v
+Canvas 2D rendering
+```
+
+`frame()` order: input update -> heatmap forecasts -> approach speeds -> havens -> clicks -> butterflies -> environment/birds -> bird diagnostics -> evaluator resolve -> draw.
+
+---
+
+# 5. World
+
+* World size: 1000 x 650 logical units, scaled to the canvas (DPR capped at 2).
+* Entities: 2 butterflies, 8 flowers, 7 trees, 5 birds, ambient motes and grass.
+* Grass leans away from visitors; tree canopies sway/rustle with visitor proximity and forest disturbance.
+
+Key constants (`demo2d.js`):
+
+```text
+ALERT_DISTANCE 155     CLOSE_DISTANCE 76      TOUCH_DISTANCE 31     SAFE_DISTANCE 210
+THREAT_RADIUS 260      flee threat >= 0.3  ->  flee radius ~182 px
+GENTLE_APPROACH 185    RAPID_APPROACH 310 px/s
+CURIOSITY_STILLNESS 2500 ms     HAVEN_STILLNESS 3500 ms
+VISITOR_DISTURBANCE_DISTANCE 120
+PREDICTIVE_FLEE_RECOVERY 1000 ms     PREDICTIVE_FLEE_REARM 850 ms
+MIN_ENERGY 0.15
 ```
 
 ---
 
-## 3.2 Rendering Must Not Determine Behavior
+# 6. Visitor Input
 
-Three.js is responsible for visualization.
+## 6.1 VisitorInput
+Normalizes all sources into one visitor list. Mouse is the default; the camera provider is attached once `CameraInput.init()` succeeds. Consumers never care which source a visitor came from.
 
-The behavior system should not depend on:
+Visitor fields used downstream: `id`, `x`, `y`, `active`, `gesture`, `isClicked`, `clickX/clickY`, `lastMovedAt`.
 
-```text
-Mesh
-Material
-Geometry
-Camera
-Renderer
-```
-
-unless absolutely necessary.
-
-The behavior engine should work primarily with numerical world-state information.
+## 6.2 CameraInput (MediaPipe)
+* HandLandmarker, up to **4 hands**, GPU delegate with CPU fallback, video running mode.
+* Camera: 480x360 ideal at up to 60 fps for low latency.
+* The mirrored index fingertip is the pointer, blending toward the thumb/index midpoint as a pinch begins.
+* **Smoothing and tracking**: a One Euro filter smooths normalized coordinates; implausible jumps must persist for 3 frames before being accepted. Hand matching uses position with a handedness preference; lost hands are retained for 250 ms.
+* **Pinch**: thumb/index distance is normalized by palm size, with hysteresis (start < 0.30, release > 0.50) and 45 ms confirmation. Pinch start registers a click at the thumb/index midpoint.
+* **Gestures**: `open-palm` and `fist`, confirmed after 140 ms stability.
+* Hand IDs are `camera:hand-N`; visitors are returned sorted by ID.
 
 ---
 
-## 3.3 Input Must Be Replaceable
+# 7. ThreatProvider
 
-The butterfly should not know whether the visitor came from:
+Shared, exported threat model used by butterflies, birds, and prediction.
 
-```text
-Mouse
-```
-
-or:
-
-```text
-Webcam
-```
-
-or:
-
-```text
-MediaPipe
-```
-
-The input layer must normalize all sources into the same visitor-state representation.
+* `getThreatAt(x, y, ignoreCalmVisitors)` -> 0..1, `1 - distance / THREAT_RADIUS` for the strongest visitor.
+* `getThreatVectorAt(...)` -> unit vector pointing away from the nearest relevant visitor.
+* Calm visitors (still > 2.5 s) can be ignored; calm visitors cannot frighten creatures until they move again.
 
 ---
 
-# 4. Runtime Data Flow
+# 8. Butterfly Behavior (2D)
 
-The current frame-by-frame pipeline is:
-
-```text
-requestAnimationFrame()
-        ↓
-VisitorInput state
-        ↓
-InteractionEngine
-        ↓
-BehaviorEngine
-        ↓
-Butterfly.update()
-        ↓
-renderer.render()
-```
-
-The important rule is:
-
-> The animation loop coordinates systems; individual systems should remain responsible for their own domain.
-
-## 4.1 Prediction and early-warning pipeline
-
-The 2D demo also runs a prediction pipeline each frame:
+## 8.1 States
 
 ```text
-Mouse / camera visitor positions
-        ↓
-Recent position and visitor-to-butterfly distance samples
-        ↓
-Trend predictor + visitor-location heatmap predictor
-        ↓
-PredictionEvaluator records warnings and outcomes
-        ↓
-V3Trend or V3Heatmap may trigger an early butterfly FLEE
-V3Heatmap cues perched birds, then may move them to a safer tree
+REST    calm, stationary, recovers energy
+EXPLORE wanders flower to flower
+ALERT   visitor close or approaching; cautious, keeps distance
+CURIOUS calm visitor present; slow orbit around the visitor
+FLEE    escaping a threat (fast, high response)
+RETURN  returns to nearest flower after danger
+HAVEN   landed on a visitor holding an open palm
 ```
 
-`PredictionTrend.js` estimates how quickly the distance between a particular
-visitor and butterfly is shrinking. It compares the current distance with a
-sample from roughly 450–900 ms earlier, choosing one near 600 ms. Positive
-closing speed is supplied to `PredictionEngineV3.js`; movement away does not
-increase risk. The engine also reads visitor speed directly: a faster visitor
-can be treated as approaching sooner, while slow movement contributes less
-risk at the same distance. The original V3 inputs and behavior remain available
-as a baseline.
+## 8.2 Transition priorities (per frame)
+1. Haven (open-palm visitor, threat < 0.3) overrides normal logic.
+2. FLEE if: visitor within touch distance, threat >= 0.3, a curiosity target is disturbed by another visitor, or a **prediction-triggered flee** fires.
+3. Stay in FLEE while the visitor is threatening / prediction flee active; recover when safe or the visitor is calm and fear < 0.55.
+4. Rapid approach inside alert range -> FLEE.
+5. Calm visitor, no nearby threat, fear < 0.58 -> CURIOUS.
+6. Close/approaching visitor -> ALERT; ALERT/FLEE -> RETURN when safe; REST -> EXPLORE after rest duration (3.75 s) if energy > 0.22.
 
-`VisitorHeatmap.js` estimates where each visitor may be in 1.5 seconds. It
-samples the visitor's position, estimates recent horizontal and vertical
-movement, and projects that movement forward. It places a probability
-distribution over a 50 px grid, centered on the projected position. Faster
-movement creates a wider, less certain distribution and also raises the
-behavior-risk multiplier. Slow or stationary movement scales down the chance
-that a forecast visitor will disturb an animal, even when the projected
-position is similar: the speed multiplier rises from 0.12 at rest to 1.0 at
-300 px/s. If there is not enough movement history, the forecast stays centered
-on the current position. Invalid and implausibly fast movement samples are
-ignored. The predictor also scores
-each location forecast against the visitor's actual location at the end of the
-horizon, reporting mean/median position error and the percentage within one
-grid cell. Forecasts without an observed outcome (for example, when a pointer
-leaves the canvas) are counted separately instead of treated as misses.
+## 8.3 Internal variables
+* **Fear** (0..1): +0.15/s while a moving visitor approaches or is close; decays 0.045/s (0.075/s when visitor is calm).
+* **Energy** (0.15..1): FLEE -0.16/s, ALERT -0.035/s, REST +0.025/s; scales explore speed.
+* Per-creature id (`butterfly-1`, `butterfly-2`) used for prediction diagnostics.
 
-For each butterfly or bird perch, the heatmap predictor adds up the probability
-in grid cells within the normal flee distance (182 px). Calm visitors are
-ignored, and risks from multiple visitors are combined. A score of 0.5 or
-higher is a strong warning. Scores from 0.25 cue a perched bird to flutter;
-at 0.5, a perched bird can fly to an available tree far from the projected
-visitor location. An active bird haven takes priority. Reactions can re-arm
-after the visitor retreats beyond the safe distance and the warning stays low
-for 850 ms, or sooner if that visitor becomes calm or leaves.
-
-For butterflies, either V3Trend or V3Heatmap can trigger early flight while
-ordinary threat is still below its flee threshold. Episodes include a
-`predictionSource` label (`V3Trend`, `V3Heatmap`, or both) so reports distinguish
-prediction-initiated flight from normal threat-driven behavior. The heatmap is
-therefore no longer only shadow-mode; its animal responses are active and
-should be evaluated carefully against false alarms as well as useful early
-reactions. Butterfly prediction warnings have a visible amber ring/label and
-faster wing flutter. Per-visitor re-arming also waits for a clear retreat from
-the safe boundary and a low-risk interval, preventing a single encounter from
-causing constant repeated flights while allowing a new approach to trigger
-again.
-
-The trend-enabled V3 predictor **does** trigger early flight. When it predicts
-a disturbance before the normal threat threshold, the butterfly chooses an
-escape direction away from the visitor. A short recovery hold avoids rapidly
-switching between FLEE and RETURN. Evaluator episodes are marked when a
-predictor initiated the flee, so these intervention-driven outcomes can be
-separated from independent predictions.
-
-For local inspection in the browser console:
-
-* `comparePredictors()` compares V3, V3Trend, V3Heatmap, and V2 metrics.
-* `predictionReport()` prints their summaries and flee episodes.
-* `visitorHeatmapReport()` returns current visitor forecasts, grids, and
-  per-visitor location-forecast accuracy.
-* `toggleVisitorHeatmap()` shows or hides the forecast overlay on the forest.
-* `downloadPredictions()` downloads the metrics, episodes, and heatmap grids.
-* The console logs `[Butterfly] ... (V3Heatmap prediction)` and
-  `[BirdPrediction]` when a forecast causes an early animal response.
+## 8.4 Movement and orientation
+* Target-based movement with exponential velocity blending (faster in FLEE).
+* Escape target: samples 8 directions, picks lowest-threat direction (ties broken by alignment with the away vector); prediction-triggered flees may escape even at zero current threat.
+* Mild-threat (0.1–0.3) **threat orientation**: butterfly turns toward the threat first (eased turn, movement paused during turn).
+* Heading follows velocity; flutter speed increases when fleeing or when a prediction cue is active.
 
 ---
 
-# 5. Main Application
+# 9. Bird Behavior
 
-File:
+Birds perch in trees (one per tree) and are peeking/hidden by visitor distance.
 
-```text
-src/main.js
-```
-
-Responsibilities:
-
-* create the Three.js scene
-* create the camera
-* create the renderer
-* create lights
-* create world objects
-* create visitor input
-* create interaction engine
-* create behavior engine
-* run the animation loop
-* coordinate system updates
-* render the scene
-
-`main.js` should not contain complex butterfly behavior rules.
+* **Readiness flutter**: perch threat 0.3–0.6, or forecast risk >= 0.25.
+* **Predictive escape**: when forecast says a visitor will reach the perch, the bird flies to the tree farthest from the predicted visitor position (1.1 s flight); a per-visitor latch prevents repeating until re-armed (visitor far + low risk for 850 ms).
+* **Curiosity**: a single shared owner at a time; a random bird investigates a calm, undisturbed visitor, orbiting it. Ends on timer, visitor movement/disturbance, or target loss, then returns to a tree.
+* **Haven** (fist gesture): a bird flies to and stays near the visitor until the gesture ends.
+* **Clicks**: clicking/pinching a tree rustles it and relocates its bird to a free tree. Hovering rustles trees slightly.
+* **Safety**: `birdVisitorPosition()` validates visitor coordinates and falls back to the bird's last known/tree position, preventing flights to (0,0) when a visitor disappears.
 
 ---
 
-# 6. VisitorInput
+# 10. Safe Havens (Gestures)
 
-File:
-
-```text
-src/interaction/VisitorInput.js
-```
-
-Responsibility:
-
-> Convert physical user input into normalized visitor state.
-
-The current physical input source is the mouse.
+* Open palm -> butterfly haven; fist -> bird haven.
+* Gesture must be held **still for 3.5 s**; progress is drawn as a charging ring around the visitor.
+* One visitor per haven type at a time (reservation). Others receive a cue message ("The birds need a safe haven too", etc.).
+* Moving, changing gesture, or a threat >= 0.3 ends the haven.
 
 ---
 
-# 7. Visitor Input Contract
+# 11. Prediction Layer
 
-The visitor state exposed to the rest of the system is conceptually:
+## 11.1 Goal
+Predict, with a **1500 ms horizon**, whether a creature will enter FLEE, so it can react earlier.
 
-```js
-{
-  x: Number,
-  y: Number,
-  speed: Number,
-  isMoving: Boolean
-}
-```
+## 11.2 Predictors
 
-Internally, `VisitorInput` also maintains:
+| Module | Idea | Role |
+|---|---|---|
+| `PredictionEngine.js` (V1) | Weighted proximity / approach / fear heuristic | Historical baseline |
+| `PredictionEngineV2.js` | Threat term + fear term | Baseline comparison (same events) |
+| `PredictionEngineV3.js` | **Time-to-flee**: `(distance - 182) / closingSpeed`; fear ignored | Primary predictor |
+| V3 + `PredictionTrend.js` | V3 with `trendClosingSpeed` from distance history (450–900 ms window) | **Behavior-driving candidate** |
+| `VisitorHeatmap.js` | Per-visitor motion forecast as a 50 px probability grid | **Behavior-driving candidate** |
 
-```js
-hasInput
-```
+**V3 details**: risk is 1 inside the flee radius; time risk = `1 - timeToFlee / (2 * horizon)`; closing speed = max(approach, trend, 0.25 * visitor speed); speeds above 600 px/s are treated as tracker glitches; a capped proximity term (max 0.45) fades with stillness; terms are combined with noisy-or; warning at risk >= 0.5. Calm visitors inside the threat radius produce zero risk. Constants must stay in sync with `demo2d.js`.
 
-`hasInput` is not part of the external behavioral contract.
+**Trend estimator**: closing speed from a same-visitor sample 450–900 ms old (target 600 ms); speeds above 800 px/s are discarded.
 
-It is an initialization guard.
+**Heatmap predictor**: velocity from recent history, forecast point = position + velocity * horizon (clamped to world), gaussian spread = 35 px + 0.08 * speed, probabilities normalized over a 20 x 13 grid. Risk = probability within the flee distance of the creature, scaled by a speed multiplier (0.12 at rest up to 1.0 at 300+ px/s); multiple visitors combine as independent risks; warning at risk >= 0.5. Forecast accuracy (MAE, within-one-cell %) is tracked per visitor.
 
----
+## 11.3 How predictions affect behavior
+* **Butterflies** flee early when the Trend or Heatmap warning fires (source logged as `V3Trend`, `V3Heatmap`, or both), threat is still < 0.3, and that visitor has not already triggered a predictive flee. After the flee, a re-arm period (visitor distant, risk < 0.25, closing speed <= 0) allows the next one.
+* **Birds** use the heatmap forecast for readiness and predictive tree escape (Section 9).
+* **V3 (primary) and V2** remain shadow-only: evaluated on the same events, never used for control.
+* Visual cues: orange ring + "PREDICTED" (butterfly) / "FORECAST" (bird); optional heatmap overlay.
 
-# 8. Visitor Position Coordinate System
-
-Visitor position is stored in Three.js world coordinates.
-
-The mouse starts in browser/screen coordinates:
-
-```text
-(clientX, clientY)
-```
-
-The conversion process is:
-
-```text
-Screen coordinates
-       ↓
-Canvas-relative coordinates
-       ↓
-Normalized Device Coordinates
-       ↓
-Camera ray
-       ↓
-Ground-plane intersection
-       ↓
-World coordinates
-```
+## 11.4 Ordering rule
+Prediction is observed **before** the FLEE state change within a frame, so the evaluator sees the true pre-flee inputs. Snapshot recording happens after the behavior decision; frames that cause FLEE are skipped as snapshots to avoid labelling an already-occurring flee as a prospective success.
 
 ---
 
-# 9. Canvas Coordinate Conversion
+# 12. PredictionEvaluator (Shadow Evaluation)
 
-The rendering canvas is obtained from:
+One evaluator per predictor (V3, V2, V3Trend, V3Heatmap). It never controls behavior.
 
-```js
-renderer.domElement
-```
-
-The canvas bounds are obtained with:
-
-```js
-domElement.getBoundingClientRect()
-```
-
-The relative mouse coordinates are:
-
-```js
-const mouseX =
-  event.clientX - rect.left
-
-const mouseY =
-  event.clientY - rect.top
-```
-
-Normalized device coordinates are then calculated as:
-
-```js
-mouse.x =
-  (mouseX / rect.width) * 2 - 1
-
-mouse.y =
-  -(mouseY / rect.height) * 2 + 1
-```
-
-The resulting range is:
-
-```text
-x = -1 → +1
-y = -1 → +1
-```
+* **Snapshots**: sampled every 1500 ms; each prediction is resolved after the horizon as TP/FP/FN/TN -> precision, recall, false-positive rate.
+* **Flee episodes**: each FLEE entry/exit is recorded with entry inputs, a downsampled 6 s trace, warning lead time, and whether the flee was prediction-triggered.
+* **Advance warning**: a warning counts only if it began >= 50 ms before the flee and persisted (500 ms off-grace); the warning clock resets per flee and ignores time spent in FLEE.
+* **Event groups**: `NO_ACTIVE_VISITOR`, `UNANTICIPATED_CALM_TO_MOVEMENT` (calm curiosity followed by sudden movement), `CONTINUING_ENCOUNTER` (same visitor re-fleeing within 2 s), `NEW_DISTURBANCE_CANDIDATE`.
+* **Diagnostics (non-excluding)**: rapid boundary re-flee, high visitor speed, visitor absence, changed visitor ID, high-fear/zero-threat false positives, stillness/curiosity evidence.
+* **Metrics**: raw, evaluable (excludes verified calm-to-movement and no-visitor episodes), and boundary-adjusted recall and median lead time; new-disturbance-candidate recall.
 
 ---
 
-# 10. Raycasting
+# 13. Diagnostics and Console Tools
 
-The raycaster is:
+Logs:
+* `[PredictionDiag]` — per-creature, at most 1/s: inputs, risks, warnings.
+* `[Butterfly] State: A -> B (source prediction)` — state changes.
+* `[BirdDiag]`, `[BirdCuriosityDiag]`, `[BirdPrediction]` — bird state, curiosity sessions, forecast escapes.
 
-```js
-THREE.Raycaster
-```
-
-It is configured using:
-
-```js
-raycaster.setFromCamera(
-  mouse,
-  camera
-)
-```
-
-The ray is then intersected with:
-
-```js
-new THREE.Plane(
-  new THREE.Vector3(0, 1, 0),
-  0
-)
-```
-
-This represents the horizontal plane:
-
-```text
-Y = 0
-```
-
-The resulting intersection point becomes:
-
-```text
-visitor.position
-```
+Console functions:
+* `comparePredictors()` — side-by-side V3 / V3Trend / V3Heatmap / V2 metrics.
+* `predictionReport()` — summaries and flee-episode table.
+* `downloadPredictions()` — JSON export of all records, episodes, heatmaps, accuracy.
+* `visitorHeatmapReport()` — current forecasts and accuracy per visitor.
+* `toggleVisitorHeatmap()` — show/hide forecast overlay.
 
 ---
 
-# 11. Visitor Speed
+---
 
-Visitor speed is currently calculated using world-space distance between:
+# 14. Design Rules
 
-```text
-current position
-```
-
-and:
-
-```text
-previous position
-```
-
-Conceptually:
-
-```js
-speed =
-  current.distanceTo(
-    previous
-  )
-```
-
-This is currently a per-frame displacement value.
-
-It is not yet normalized to physical units per second.
-
-This can be improved later if needed.
+1. Rendering never decides behavior.
+2. Input sources are interchangeable; creatures see only normalized visitors.
+3. Shared threat logic lives in `ThreatProvider`.
+4. Predictors are pure functions/classes with no knowledge of creatures; `demo2d.js` wires them in.
+5. New predictors are added in **shadow mode first**, evaluated against the same events, and only promoted to behavior after evaluation.
+6. Constants shared between `demo2d.js` and predictors must be kept in sync.
+7. Runtime errors inside the frame loop are treated as serious; invalid or missing visitor data must degrade safely.
 
 ---
 
-# 12. Movement Threshold
+# 15. Testing
 
-Tiny mouse movements should not necessarily count as intentional visitor movement.
-
-The current threshold is approximately:
-
-```text
-0.001
-```
-
-Therefore:
-
-```js
-isMoving =
-  speed > 0.001
-```
-
-This prevents insignificant numerical changes from constantly triggering movement behavior.
+* Unit tests (`node:test`): PredictionEngine (V1), V3, PredictionTrend, VisitorHeatmap, PredictionEvaluator.
+* Manual scenarios: still visitor (calm/curious), steady approach, fast approach, approach-and-retreat, multiple hands, haven gestures, tree clicks, visitor disappearing during bird investigation.
+* Evaluation: use `comparePredictors()` / `predictionReport()` after controlled runs; check false positives, recall, and lead time before promoting any predictor.
+* Regression baseline: existing bird and butterfly behaviors validated before predictive changes.
 
 ---
 
-# 13. InteractionEngine
-
-File:
+# 16. Current Status
 
 ```text
-src/interaction/InteractionEngine.js
+Visitor input (mouse + multi-hand camera)  COMPLETE / REFINING
+ThreatProvider                              COMPLETE
+Butterfly state machine (+fear, energy)     COMPLETE
+Curiosity and safe havens                   COMPLETE
+Bird system                                 COMPLETE / REFINING
+V3 predictor, trend, heatmap                IN EVALUATION (trend + heatmap drive behavior)
+PredictionEvaluator                         COMPLETE / EXTENDING
+Audio                                       NOT IMPLEMENTED
+ML behavior model                           FUTURE
+AI Director                                 FUTURE
 ```
 
-Responsibility:
-
-> Translate visitor state and butterfly position into environmental interaction information.
-
-It does not decide the butterfly's final behavior state.
-
----
-
-# 14. Interaction Engine Contract
-
-The interaction engine returns:
-
-```js
-{
-  distance: Number,
-  isDanger: Boolean,
-  escapeDirection: THREE.Vector3
-}
-```
+## Known open items
+* Validate predictive flee against false positives across more controlled scenarios.
+* Tune heatmap/trend thresholds using exported records.
+* Complete bird return-flight validation after visitor disappearance.
+* Audio, persistent world state, and ML/AI-director layers remain future work.
 
 ---
 
-# 15. Distance Calculation
-
-Distance is currently calculated horizontally using X and Z.
-
-Given:
-
-```text
-Butterfly = (bx, bz)
-Visitor   = (vx, vz)
-```
-
-the differences are:
-
-```text
-dx = bx - vx
-dz = bz - vz
-```
-
-Distance is:
-
-```text
-sqrt(
-  dx² + dz²
-)
-```
-
-This intentionally ignores Y.
-
-The current interaction model is primarily horizontal.
-
----
-
-# 16. Escape Direction
-
-Escape direction is:
-
-```text
-Butterfly position
--
-Visitor position
-```
-
-Conceptually:
-
-```js
-new THREE.Vector3(
-  butterfly.x - visitor.x,
-  0,
-  butterfly.z - visitor.z
-)
-```
-
-The vector is normalized when the distance is non-zero.
-
-The result points away from the visitor.
-
----
-
-# 17. Initial Input Guard
-
-If the visitor has not interacted with the scene yet:
-
-```js
-hasInput === false
-```
-
-the interaction engine returns:
-
-```js
-{
-  distance: Infinity,
-  isDanger: false,
-  escapeDirection:
-    new THREE.Vector3()
-}
-```
-
-This prevents false initial interaction.
-
----
-
-# 18. Interaction Distances
-
-Current behavior thresholds are approximately:
-
-```text
-ALERT distance = 7
-FLEE distance  = 5
-SAFE distance  = 8
-```
-
-These represent behavioral thresholds rather than physical real-world measurements.
-
-They can later be tuned through configuration.
-
----
-
-# 19. BehaviorEngine
-
-File:
-
-```text
-src/ai/BehaviorEngine.js
-```
-
-Responsibility:
-
-> Decide the butterfly's high-level behavioral state and movement intent.
-
-It does not directly manipulate the Three.js mesh.
-
----
-
-# 20. Butterfly State Machine
-
-Current states:
-
-```text
-REST
-EXPLORE
-ALERT
-FLEE
-RETURN
-```
-
----
-
-# 21. State Definitions
-
-## REST
-
-Meaning:
-
-```text
-Butterfly is calm and stationary.
-```
-
-Behavior:
-
-* no movement
-* waits for visitor disturbance
-* starts an exploration timer
-
-Transitions:
-
-```text
-REST → ALERT
-```
-
-when:
-
-```text
-distance < alertDistance
-```
-
-and:
-
-```text
-REST → EXPLORE
-```
-
-after the rest timer expires.
-
----
-
-# 22. EXPLORE
-
-Meaning:
-
-```text
-Butterfly is calmly wandering.
-```
-
-Behavior:
-
-* move toward an exploration target
-* periodically select a new target
-* remain inside the safe exploration area
-
-Transitions:
-
-```text
-EXPLORE → ALERT
-```
-
-when:
-
-```text
-distance < alertDistance
-```
-
----
-
-# 23. ALERT
-
-Meaning:
-
-```text
-Butterfly has noticed the visitor.
-```
-
-Behavior:
-
-* remain cautious
-* prepare to flee if the visitor gets closer
-* may continue limited movement
-
-Transitions:
-
-```text
-ALERT → FLEE
-```
-
-when:
-
-```text
-distance < fleeDistance
-```
-
-and:
-
-```text
-ALERT → RETURN
-```
-
-when:
-
-```text
-distance >= safeDistance
-```
-
----
-
-# 24. FLEE
-
-Meaning:
-
-```text
-Butterfly is actively escaping the visitor.
-```
-
-Behavior:
-
-* move rapidly away from visitor
-* use interaction engine's escape direction
-
-Transition:
-
-```text
-FLEE → RETURN
-```
-
-when:
-
-```text
-distance >= safeDistance
-```
-
----
-
-# 25. RETURN
-
-Current Day 3 meaning:
-
-```text
-The disturbance has ended.
-The butterfly is calming down.
-```
-
-The current implementation does not yet physically navigate to a flower.
-
-This is intentional.
-
-Actual return-to-flower behavior is a Day 4 feature.
-
-Transitions:
-
-```text
-RETURN → ALERT
-```
-
-if the visitor approaches again.
-
-Otherwise:
-
-```text
-RETURN → REST
-```
-
----
-
-# 26. State Transition Diagram
-
-```text
-                         visitor approaches
-                              │
-                              ▼
-                         ┌─────────┐
-                    ┌───→│  ALERT  │
-                    │    └────┬────┘
-                    │         │
-                    │         │ visitor very close
-                    │         ▼
-┌────────┐          │    ┌─────────┐
-│  REST  │──────────┘    │  FLEE   │
-└───┬────┘               └────┬────┘
-    │                         │
-    │ timer                   │ safe distance
-    │ expires                 │
-    ▼                         ▼
-┌─────────┐              ┌─────────┐
-│ EXPLORE │              │ RETURN  │
-└────┬────┘              └────┬────┘
-     │                        │
-     │ visitor approaches    │ disturbance ended
-     └──────────→ ALERT      │
-                             ▼
-                          ┌──────┐
-                          │ REST │
-                          └──────┘
-```
-
----
-
-# 27. REST Timer
-
-The current rest duration is:
-
-```text
-5000 ms
-```
-
-or:
-
-```text
-5 seconds
-```
-
-The timer begins whenever the butterfly enters REST.
-
-The state transition is:
-
-```text
-REST
- ↓
-wait 5 seconds
- ↓
-EXPLORE
-```
-
-This ensures that the butterfly does not remain permanently stationary.
-
----
-
-# 28. Exploration System
-
-The exploration system uses target-based wandering.
-
-Instead of:
-
-```text
-move continuously in one fixed direction
-```
-
-the system does:
-
-```text
-Choose target
-      ↓
-Move toward target
-      ↓
-Target reached or expires
-      ↓
-Choose another target
-```
-
----
-
-# 29. Exploration Bounds
-
-Current exploration target bounds are approximately:
-
-```text
-X = -8 to +8
-Z = -8 to +8
-```
-
-The butterfly's physical boundary is approximately:
-
-```text
-X = -10 to +10
-Z = -10 to +10
-```
-
-Therefore:
-
-```text
-2-unit safety margin
-```
-
-exists between the exploration target area and the physical world boundary.
-
----
-
-# 30. Exploration Target Lifetime
-
-The current exploration target has a maximum lifetime of approximately:
-
-```text
-2500 ms
-```
-
-or:
-
-```text
-2.5 seconds
-```
-
-A new target is selected when either:
-
-```text
-distance to target < 0.5
-```
-
-or:
-
-```text
-target age >= 2.5 seconds
-```
-
-This prevents the butterfly from remaining committed to one target indefinitely.
-
----
-
-# 31. Behavior Output Contract
-
-`BehaviorEngine.update()` returns:
-
-```js
-{
-  state: String,
-  velocity: THREE.Vector3
-}
-```
-
-Example:
-
-```js
-{
-  state: "FLEE",
-  velocity: new THREE.Vector3(...)
-}
-```
-
----
-
-# 32. Vector Type Contract
-
-The behavior engine and butterfly both use:
-
-```text
-THREE.Vector3
-```
-
-for velocity.
-
-The butterfly therefore uses:
-
-```js
-this.velocity.copy(
-  behavior.velocity
-)
-```
-
-This avoids unnecessary conversion between plain objects and Three.js vectors.
-
----
-
-# 33. Butterfly Class
-
-File:
-
-```text
-src/creatures/Butterfly.js
-```
-
-Responsibility:
-
-* maintain butterfly state data
-* maintain velocity
-* update world position
-* synchronize mesh position
-* enforce physical boundaries
-* render butterfly geometry
-
-The butterfly should not determine visitor distance itself.
-
-That calculation belongs to `InteractionEngine`.
-
----
-
-# 34. Butterfly Position
-
-The logical position is:
-
-```js
-THREE.Vector3
-```
-
-The current starting position is approximately:
-
-```text
-x = 0
-y = 2
-z = 0
-```
-
-The butterfly therefore flies approximately two world units above the ground.
-
----
-
-# 35. Butterfly Velocity
-
-Velocity is represented as:
-
-```js
-THREE.Vector3
-```
-
-The behavior engine produces a desired velocity.
-
-The butterfly receives that velocity and applies it to its position.
-
-Conceptually:
-
-```text
-BehaviorEngine
-      ↓
-desired velocity
-      ↓
-Butterfly
-      ↓
-position += velocity
-```
-
----
-
-# 36. Boundary System
-
-Current world boundaries are approximately:
-
-```text
-X = -10 to +10
-Z = -10 to +10
-```
-
-When a boundary is reached:
-
-```text
-position is clamped
-velocity component is reversed
-```
-
-Example:
-
-```js
-if (this.position.x > 10) {
-  this.position.x = 10
-  this.velocity.x *= -1
-}
-```
-
-This is a simple safety mechanism.
-
-It is not intended to represent realistic environmental navigation yet.
-
----
-
-# 37. Current Movement Limitation
-
-The current butterfly changes movement direction relatively abruptly.
-
-The current architecture does not yet contain a dedicated steering/movement controller.
-
-Future refinement should introduce:
-
-```text
-desired direction
-       ↓
-steering
-       ↓
-smooth turn
-       ↓
-velocity
-       ↓
-position
-```
-
-This will prevent abrupt direction changes.
-
----
-
-# 38. Future Butterfly Data Model
-
-The architecture specification calls for a richer butterfly state model.
-
-The planned data includes:
-
-```js
-{
-  position,
-  velocity,
-  state,
-  fear,
-  energy,
-  curiosity,
-  preferredFlower,
-  lastDisturbance,
-  targetPosition
-}
-```
-
----
-
-# 39. Fear
-
-`fear` represents accumulated disturbance.
-
-Conceptually:
-
-```text
-visitor approaches
-      ↓
-fear increases
-
-visitor remains away
-      ↓
-fear decreases
-```
-
-Fear should be clamped:
-
-```text
-0 ≤ fear ≤ 1
-```
-
-Fear should influence behavior rather than directly control rendering.
-
----
-
-# 40. Energy
-
-`energy` represents the butterfly's available movement capacity.
-
-Future behavior may use:
-
-```text
-high energy
-    ↓
-longer exploration
-
-low energy
-    ↓
-rest / return
-```
-
-Energy should also remain within:
-
-```text
-0 ≤ energy ≤ 1
-```
-
----
-
-# 41. Disturbance Memory
-
-The butterfly should eventually store:
-
-```text
-lastDisturbance
-```
-
-This allows behavior to depend not only on the current visitor distance but also on recent history.
-
-This is necessary for the project requirement that repeated chasing increases caution.
-
----
-
-# 42. Preferred Flower
-
-The butterfly should eventually have:
-
-```text
-preferredFlower
-```
-
-This represents a safe or preferred resting location.
-
-The future RETURN behavior will use this target.
-
----
-
-# 43. Target Position
-
-The butterfly should eventually use:
-
-```text
-targetPosition
-```
-
-for goals such as:
-
-```text
-exploration target
-escape point
-preferred flower
-```
-
-This allows the same movement system to support different behavioral goals.
-
----
-
-# 44. Future Day 4 Behavior
-
-The intended Day 4 flow is:
-
-```text
-Visitor approaches
-        ↓
-Fear increases
-        ↓
-Butterfly becomes ALERT
-        ↓
-Visitor gets too close
-        ↓
-FLEE
-        ↓
-Escape target selected
-        ↓
-Visitor moves away
-        ↓
-Fear begins decreasing
-        ↓
-Butterfly selects preferred flower
-        ↓
-RETURN
-        ↓
-Flower reached
-        ↓
-REST
-```
-
-This creates a more persistent behavioral loop.
-
----
-
-# 45. Future Repeated Disturbance Behavior
-
-Repeated chasing should produce increasingly cautious behavior.
-
-Conceptually:
-
-```text
-First disturbance
-    ↓
-small fear increase
-
-Second disturbance
-    ↓
-larger fear increase
-
-Repeated disturbances
-    ↓
-higher caution
-    ↓
-longer recovery
-    ↓
-less exploration
-```
-
-This creates the beginning of behavioral memory.
-
----
-
-# 46. Future ML Architecture
-
-The current rule-based system should be treated as the baseline behavior policy.
-
-A future ML model can replace or augment the decision layer.
-
-The intended architecture is:
-
-```text
-World State
-     ↓
-Feature Extraction
-     ↓
-ML Behavior Model
-     ↓
-High-Level Action
-     ↓
-Movement Controller
-     ↓
-Butterfly
-```
-
----
-
-# 47. ML Input Features
-
-Potential features:
-
-```text
-visitorDistance
-visitorSpeed
-visitorDirectionX
-visitorDirectionZ
-butterflySpeed
-butterflyFear
-butterflyEnergy
-currentState
-timeSinceDisturbance
-distanceFromFlower
-distanceFromBoundary
-```
-
-These are compact numerical features.
-
-Raw camera frames should not initially be fed directly into the butterfly behavior model.
-
----
-
-# 48. ML Output
-
-A first model can classify the desired high-level behavior:
-
-```text
-REST
-EXPLORE
-ALERT
-FLEE
-RETURN
-```
-
-Possible architecture:
-
-```text
-10–15 inputs
-      ↓
-32 hidden neurons
-      ↓
-16 hidden neurons
-      ↓
-5 outputs
-```
-
-The output with the highest probability represents the selected state.
-
----
-
-# 49. ML Dataset
-
-The first dataset can be generated synthetically.
-
-The process is:
-
-```text
-Generate world state
-       ↓
-Run rule-based behavior
-       ↓
-Record state + decision
-       ↓
-Save training example
-```
-
-Example:
-
-```text
-distance speed fear energy state action
-
-10.2     .02   .10  .95   REST    REST
-7.1      .03   .15  .95   REST    ALERT
-4.8      .20   .30  .92   ALERT   FLEE
-2.2      .80   .70  .88   ALERT   FLEE
-8.5      .01   .55  .85   FLEE    RETURN
-```
-
-This is effectively imitation learning from the deterministic behavior policy.
-
----
-
-# 50. Why Not Use an LLM Every Frame?
-
-An LLM should not control butterfly movement frame-by-frame.
-
-Animation may run at approximately:
-
-```text
-30–60+ frames per second
-```
-
-Calling a remote model every frame would introduce:
-
-* network latency
-* cost
-* unstable timing
-* dependency on internet connectivity
-* unpredictable responses
-* poor performance
-
-Therefore AI should operate at a higher level.
-
----
-
-# 51. Future AI Director
-
-A future AI director may receive a compact world summary:
-
-```text
-visitor activity
-butterfly fear
-bird activity
-recent disturbance
-environment state
-```
-
-It can then produce high-level events such as:
-
-```text
-large disturbance
-```
-
-or:
-
-```text
-environment becomes calm
-```
-
-The creature systems then respond locally.
-
-This preserves the separation between:
-
-```text
-high-level AI decisions
-```
-
-and:
-
-```text
-real-time simulation
-```
-
----
-
-# 52. Frame Loop Contract
-
-The main animation loop conceptually performs:
-
-```js
-function animate() {
-  requestAnimationFrame(
-    animate
-  )
-
-  const interaction =
-    interactionEngine
-      .getButterflyInteraction(
-        visitor,
-        butterfly.position
-      )
-
-  const behavior =
-    behaviorEngine.update(
-      butterfly.position,
-      interaction
-    )
-
-  butterfly.update(
-    behavior
-  )
-
-  renderer.render(
-    scene,
-    camera
-  )
-}
-```
-
-The exact implementation may evolve as more systems are introduced.
-
----
-
-# 53. Error Handling Principle
-
-Errors inside the animation loop are particularly serious.
-
-For example:
-
-```text
-BehaviorEngine exception
-        ↓
-animation update interrupted
-        ↓
-butterfly stops updating
-```
-
-Therefore normal runtime paths should avoid undefined method calls and invalid data.
-
-The browser console should contain no normal-flow errors during the demonstration.
-
----
-
-# 54. Testing Strategy
-
-Testing should be performed at several levels.
-
-## Input
-
-Check:
-
-* mouse position
-* visitor world position
-* visitor movement
-* initial input guard
-
-## Interaction
-
-Check:
-
-* distance calculation
-* danger threshold
-* escape direction
-
-## Behavior
-
-Check:
-
-* REST timer
-* REST → EXPLORE
-* EXPLORE → ALERT
-* ALERT → FLEE
-* FLEE → RETURN
-* RETURN → REST
-
-## Movement
-
-Check:
-
-* velocity
-* world position
-* boundaries
-* target movement
-
-## Rendering
-
-Check:
-
-* butterfly remains visible
-* world remains visible
-* no rendering errors
-
----
-
-# 55. Current Testing Procedure
-
-A basic manual test is:
-
-### Test 1 — Startup
-
-Expected:
-
-```text
-forest loads
-butterfly visible
-no console errors
-```
-
-### Test 2 — Rest
-
-Expected:
-
-```text
-butterfly remains still initially
-```
-
-### Test 3 — Exploration
-
-Wait approximately five seconds.
-
-Expected:
-
-```text
-REST → EXPLORE
-```
-
-The butterfly should begin moving.
-
-### Test 4 — Visitor Approach
-
-Move the mouse toward the butterfly.
-
-Expected:
-
-```text
-EXPLORE → ALERT
-```
-
-### Test 5 — Close Approach
-
-Continue approaching.
-
-Expected:
-
-```text
-ALERT → FLEE
-```
-
-### Test 6 — Retreat
-
-Move the mouse away.
-
-Expected:
-
-```text
-FLEE → RETURN
-```
-
-followed by:
-
-```text
-RETURN → REST
-```
-
-### Test 7 — Exploration Again
-
-After approximately five seconds:
-
-```text
-REST → EXPLORE
-```
-
-The butterfly should choose a different exploration direction.
-
----
-
-# 56. Current Known Limitations
-
-The current architecture intentionally does not yet include:
-
-* realistic butterfly steering
-* wing animation
-* butterfly fear
-* butterfly energy
-* disturbance memory
-* flower preference
-* actual return-to-flower navigation
-* bird behavior
-* environmental audio
-* MediaPipe
-* ML inference
-* AI director
-* persistent world state
-
-These are future stages.
-
----
-
-# 57. Architectural Evolution Plan
-
-## Stage 1
-
-```text
-Three.js forest
-```
-
-## Stage 2
-
-```text
-Butterfly + mouse
-```
-
-## Stage 3
-
-```text
-State machine
-```
-
-## Stage 4
-
-```text
-Fear + memory + flower
-```
-
-## Stage 5
-
-```text
-Bird + audio + environment
-```
-
-## Stage 6
-
-```text
-MediaPipe visitor input
-```
-
-## Stage 7
-
-```text
-Testing + performance + documentation
-```
-
-## Future
-
-```text
-ML behavior model
-```
-
-and potentially:
-
-```text
-AI Director
-```
-
----
-
-# 58. Architectural Rule for Future Development
-
-Before adding a new feature, determine which layer owns it.
-
-```text
-Input problem
-    → VisitorInput
-
-Interaction calculation
-    → InteractionEngine
-
-Behavior decision
-    → BehaviorEngine
-
-Physical movement
-    → Movement / Creature system
-
-Visual appearance
-    → Three.js / Creature rendering
-
-World-level state
-    → WorldState
-
-High-level AI
-    → AI Director
-```
-
-Avoid putting unrelated responsibilities into `main.js` or `Butterfly.js`.
-
----
-
-# 59. Definition of Done
-
-The V1 prototype is considered successful when:
-
-* the forest runs locally in Chrome
-* the butterfly remains visible
-* the butterfly moves continuously
-* mouse movement represents the visitor
-* the butterfly detects visitor proximity
-* the butterfly becomes alert
-* the butterfly flees
-* the butterfly can recover after disturbance
-* repeated disturbance affects behavior
-* the butterfly can return to a preferred location
-* bird behavior responds to sufficiently large disturbances
-* the project produces no normal-flow console errors
-* the complete interaction can be demonstrated within approximately 30–60 seconds
-
----
-
-# 60. Current Architecture Status
-
-```text
-VisitorInput       COMPLETE / REFINEMENT
-InteractionEngine  COMPLETE
-Butterfly          COMPLETE / REFINEMENT
-BehaviorEngine     IN PROGRESS / REFINEMENT
-World              FOUNDATION COMPLETE
-Fear System        NOT YET IMPLEMENTED
-Memory System      NOT YET IMPLEMENTED
-Flower System      NOT YET IMPLEMENTED
-Bird System        NOT YET IMPLEMENTED
-Audio              NOT YET IMPLEMENTED
-MediaPipe          NOT YET IMPLEMENTED
-ML Brain           FUTURE
-AI Director        FUTURE
-```
-
-The current priority is to make the deterministic butterfly behavior stable before introducing additional complexity.
+# 17. Future Direction
+
+* ML behavior model trained by imitation of the rule-based policy, using compact features (distance, speeds, fear, energy, state, time since disturbance); predictors' outputs are natural additional features.
+* An AI director operating at a coarse timescale on compact world summaries; it must never control per-frame movement.
+* Frame-by-frame LLM control remains explicitly rejected (latency, cost, instability).
